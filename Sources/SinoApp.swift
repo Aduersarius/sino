@@ -388,6 +388,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func hideDrop() {
+        TooltipManager.shared.hideImmediately()
         hideDetail()
         drop.orderOut(nil)
         panel = nil
@@ -675,7 +676,148 @@ final class ExtraView: NSView {
     }
 }
 
+final class TooltipPanel: NSPanel {
+    private let frost: NSVisualEffectView = {
+        let v = NSVisualEffectView()
+        v.state = .active
+        v.blendingMode = .behindWindow
+        v.wantsLayer = true
+        v.layer?.cornerRadius = 6
+        v.layer?.cornerCurve = .continuous
+        v.layer?.masksToBounds = true
+        return v
+    }()
+
+    private let label: NSTextField = {
+        let t = NSTextField(labelWithString: "")
+        t.font = .systemFont(ofSize: 11, weight: .medium)
+        t.textColor = .labelColor
+        t.drawsBackground = false
+        t.isBordered = false
+        t.alignment = .center
+        return t
+    }()
+
+    init() {
+        super.init(
+            contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        hidesOnDeactivate = false
+        isFloatingPanel = true
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        frost.addSubview(label)
+        contentView = frost
+    }
+
+    func update(text: String, for view: NSView, in win: NSWindow) {
+        label.stringValue = text
+        label.sizeToFit()
+        let padX: CGFloat = 8
+        let padY: CGFloat = 4
+        let w = ceil(label.frame.width) + padX * 2
+        let h = ceil(label.frame.height) + padY * 2
+        let sz = NSSize(width: max(w, 28), height: max(h, 18))
+
+        frost.material = Prefs.shared.frostMaterial
+        let px = 1.0 / (win.backingScaleFactor > 0 ? win.backingScaleFactor : 2.0)
+        frost.layer?.borderWidth = px
+        frost.layer?.borderColor = Prefs.shared.strokeNS.cgColor
+        frost.layer?.cornerRadius = 6
+
+        let y0 = ((sz.height - ceil(label.frame.height)) / 2).rounded()
+        label.frame = NSRect(x: padX, y: y0, width: ceil(label.frame.width), height: ceil(label.frame.height))
+        frost.frame = NSRect(origin: .zero, size: sz)
+        setContentSize(sz)
+
+        level = NSWindow.Level(rawValue: win.level.rawValue + 1)
+
+        let top = NSPoint(x: view.bounds.midX, y: view.isFlipped ? 0 : view.bounds.height)
+        let inWin = view.convert(top, to: nil)
+        let scr = win.convertToScreen(NSRect(origin: inWin, size: .zero)).origin
+
+        var x = (scr.x - sz.width / 2).rounded()
+        let y = scr.y + 6
+
+        if let screen = win.screen {
+            let minX = screen.visibleFrame.minX + 4
+            let maxX = screen.visibleFrame.maxX - sz.width - 4
+            x = max(minX, min(x, maxX))
+        }
+
+        setFrame(NSRect(x: x, y: y, width: sz.width, height: sz.height), display: true)
+        invalidateShadow()
+        orderFrontRegardless()
+    }
+}
+
+final class TooltipManager {
+    static let shared = TooltipManager()
+    private var tipPanel: TooltipPanel?
+    private var showTimer: Timer?
+    private var hideTimer: Timer?
+    private weak var currentView: NSView?
+    private(set) var isShowing = false
+
+    func show(_ text: String, for view: NSView) {
+        hideTimer?.invalidate()
+        hideTimer = nil
+
+        if currentView === view && isShowing { return }
+        currentView = view
+
+        showTimer?.invalidate()
+
+        if isShowing {
+            display(text, for: view)
+        } else {
+            showTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self, weak view] _ in
+                guard let self, let view, self.currentView === view else { return }
+                self.display(text, for: view)
+            }
+        }
+    }
+
+    func hide(for view: NSView? = nil) {
+        if let view, currentView !== view { return }
+        showTimer?.invalidate()
+        showTimer = nil
+
+        hideTimer?.invalidate()
+        hideTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.tipPanel?.orderOut(nil)
+            self.isShowing = false
+            self.currentView = nil
+        }
+    }
+
+    func hideImmediately() {
+        showTimer?.invalidate()
+        showTimer = nil
+        hideTimer?.invalidate()
+        hideTimer = nil
+        tipPanel?.orderOut(nil)
+        isShowing = false
+        currentView = nil
+    }
+
+    private func display(_ text: String, for view: NSView) {
+        guard let win = view.window, !text.isEmpty else { hideImmediately(); return }
+        let panel = tipPanel ?? TooltipPanel()
+        tipPanel = panel
+        panel.update(text: text, for: view, in: win)
+        isShowing = true
+    }
+}
+
 struct HoverPad: NSViewRepresentable {
+    var tip: String? = nil
     var selected = false
     var captureHits = false
     var onClick: (() -> Void)? = nil
@@ -685,12 +827,14 @@ struct HoverPad: NSViewRepresentable {
         v.selected = selected
         v.captureHits = captureHits
         v.onClick = onClick
+        v.tip = tip
         return v
     }
     func updateNSView(_ v: HoverBG, context: Context) {
         v.selected = selected
         v.captureHits = captureHits
         v.onClick = onClick
+        v.tip = tip
         v.needsDisplay = true
         v.updateTrackingAreas()
     }
@@ -1220,10 +1364,10 @@ struct Dashboard: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 20)
                 .background(pal.track, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .overlay { HoverPad(captureHits: true, onClick: { App.shared.cycleInterval() }) }
+                .overlay { HoverPad(tip: "Refresh interval — click to cycle", captureHits: true, onClick: { App.shared.cycleInterval() }) }
                 .help("Refresh interval — click to cycle")
                 .accessibilityAddTraits(.isButton)
-            tool("circle.lefthalf.filled", "Theme") { App.shared.cycleTheme() }
+            tool(themeIcon, "Theme") { App.shared.cycleTheme() }
             tool("gearshape.fill", "Settings") { app.openSettings() }
         }
         .padding(4)
@@ -1232,7 +1376,8 @@ struct Dashboard: View {
     }
 
     var customTool: some View {
-        Group {
+        let tip = app.prefs.customApp.isEmpty ? "Set toolbar app" : app.prefs.customAppName
+        return Group {
             if let img = app.prefs.customAppIcon {
                 Image(nsImage: img).resizable().interpolation(.high).frame(width: 12, height: 12)
             } else {
@@ -1244,8 +1389,8 @@ struct Dashboard: View {
         .frame(maxWidth: .infinity)
         .frame(height: 20)
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(pal.track))
-        .overlay { HoverPad(captureHits: true, onClick: { App.shared.openCustomApp() }) }
-        .help(app.prefs.customApp.isEmpty ? "Set toolbar app" : app.prefs.customAppName)
+        .overlay { HoverPad(tip: tip, captureHits: true, onClick: { App.shared.openCustomApp() }) }
+        .help(tip)
         .accessibilityAddTraits(.isButton)
         .contextMenu {
             Button("Choose App…") { app.prefs.pickCustomApp() }
@@ -1260,6 +1405,14 @@ struct Dashboard: View {
         return v < 1 ? String(format: "%.1fs", v) : String(format: "%.0fs", v)
     }
 
+    var themeIcon: String {
+        switch app.theme {
+        case "light": return "sun.max.fill"
+        case "dark": return "moon.fill"
+        default: return "laptopcomputer"
+        }
+    }
+
     func tool(_ name: String, _ tip: String, selected: Bool = false, tint: Color? = nil, action: @escaping () -> Void) -> some View {
         Image(systemName: name)
             .font(.system(size: 11, weight: .semibold))
@@ -1270,7 +1423,7 @@ struct Dashboard: View {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(selected ? pal.accent.opacity(0.12) : pal.track)
             )
-            .overlay { HoverPad(selected: selected, captureHits: true, onClick: action) }
+            .overlay { HoverPad(tip: tip, selected: selected, captureHits: true, onClick: action) }
             .help(tip)
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel(tip)

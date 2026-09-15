@@ -833,6 +833,13 @@ final class HoverBG: NSView {
     var hugPopup = false
     var captureHits = false
     var onClick: (() -> Void)?
+    var tip: String? {
+        didSet {
+            if hovering, let tip, !tip.isEmpty {
+                TooltipManager.shared.show(tip, for: self)
+            }
+        }
+    }
     var selected = false { didSet { needsDisplay = true } }
     private var hovering = false { didSet { needsDisplay = true } }
     private var tracking = false
@@ -845,6 +852,15 @@ final class HoverBG: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         DispatchQueue.main.async { self.updateTrackingAreas() }
+    }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            TooltipManager.shared.hide(for: self)
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+    deinit {
+        TooltipManager.shared.hideImmediately()
     }
     override func layout() {
         super.layout()
@@ -859,9 +875,18 @@ final class HoverBG: NSView {
             userInfo: nil
         ))
     }
-    override func mouseEntered(with event: NSEvent) { hovering = true }
-    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        if let tip, !tip.isEmpty {
+            TooltipManager.shared.show(tip, for: self)
+        }
+    }
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        TooltipManager.shared.hide(for: self)
+    }
     override func mouseDown(with event: NSEvent) {
+        TooltipManager.shared.hideImmediately()
         if onClick != nil {
             tracking = true
             pressed = true
@@ -886,6 +911,7 @@ final class HoverBG: NSView {
         forward(event) { $0.mouseUp(with: $1) }
     }
     override func rightMouseDown(with event: NSEvent) {
+        TooltipManager.shared.hideImmediately()
         guard onClick != nil || captureHits else { return }
         forward(event) { $0.rightMouseDown(with: $1) }
     }
