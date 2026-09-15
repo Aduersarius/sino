@@ -49,9 +49,7 @@ Prefers the release zip; falls back to building `main`. Copies to `/Applications
 ### Homebrew
 
 ```bash
-brew tap Aduersarius/sino https://github.com/Aduersarius/sino
-brew install sino
-cp -R "$(brew --prefix)/opt/sino/Sino.app" /Applications && open /Applications/Sino.app
+brew install Aduersarius/tap/sino
 ```
 
 ### From source
