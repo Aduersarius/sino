@@ -155,8 +155,14 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         guard extra != nil, let button = item?.button else { return }
         extra.chips = menuChips()
         let h = max(button.bounds.height, 22)
-        extra.frame = NSRect(origin: .zero, size: NSSize(width: extra.fittingWidth, height: h))
-        item.length = extra.fittingWidth + 10
+        let w = extra.fittingWidth
+        if abs(extra.frame.width - w) > 0.5 || abs(extra.frame.height - h) > 0.5 {
+            extra.frame = NSRect(origin: .zero, size: NSSize(width: w, height: h))
+        }
+        let len = w + 4
+        if abs(item.length - len) > 0.5 {
+            item.length = len
+        }
         button.effectiveAppearance.performAsCurrentDrawingAppearance {
             button.image = extra.makeImage()
         }
@@ -216,6 +222,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         if h < 80 { h = 120 }
         h = min(h, 780)
         positionDrop(NSSize(width: 268, height: h))
+        if let c = catcher { drop.order(.above, relativeTo: c.windowNumber) }
         if panel != nil { showDetail() } else { hideDetail() }
     }
 
@@ -231,7 +238,12 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             x = min(max(x, vis.minX + 6), vis.maxX - size.width - 6)
             if y < vis.minY { y = br.maxY + 5 }
         }
-        drop.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+        let next = NSRect(x: x, y: y, width: size.width, height: size.height)
+        let f = drop.frame
+        if abs(f.minX - next.minX) > 0.5 || abs(f.minY - next.minY) > 0.5
+            || abs(f.width - next.width) > 1 || abs(f.height - next.height) > 2 {
+            drop.setFrame(next, display: true)
+        }
     }
 
     func showDetail() {
@@ -388,7 +400,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func startClickMon() {
         stopClickMon()
         clickMon = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.hideDrop()
+            self?.closeIfOutside()
         }
         // ponytail: WindowServer skips fully-clear pixels — 1/255 is enough to hit-test
         let screen = (item.button?.window?.screen ?? NSScreen.main)?.frame ?? .zero
@@ -403,7 +415,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         p.isFloatingPanel = true
         let v = CatcherView(frame: NSRect(origin: .zero, size: screen.size))
         v.autoresizingMask = [.width, .height]
-        v.onDown = { [weak self] in self?.hideDrop() }
+        v.onDown = { [weak self] in self?.closeIfOutside() }
         p.contentView = v
         p.setFrame(screen, display: false)
         p.orderFrontRegardless()
@@ -552,7 +564,7 @@ final class ExtraView: NSView {
     }
 
     // ponytail: name/% stack; battery = Stats xl 26×14, width 30 either way
-    private let gap: CGFloat = 5
+    private let gap: CGFloat = 2
     private var labelFont: NSFont { .systemFont(ofSize: 8, weight: .regular) }
     private var valueFont: NSFont { .monospacedDigitSystemFont(ofSize: 12, weight: .regular) }
     private var labelAttrs: [NSAttributedString.Key: Any] {
@@ -578,18 +590,20 @@ final class ExtraView: NSView {
     }
 
     func chipWidth(_ c: MenuChip) -> CGFloat {
-        if c.batteryFrac != nil { return 30 } // body+cap; bolt packs inside, width fixed
-        if c.isNet {
-            return ceil(("↑ 1023 KB/s" as NSString).size(withAttributes: netAttrs).width + 2)
-        }
+        if c.batteryFrac != nil { return 30 }
+        if c.isNet { return 66 }
         let lw = (c.label as NSString).size(withAttributes: labelAttrs).width
-        let vw = (c.value as NSString).size(withAttributes: valueAttrs).width
+        if c.label == "FAN" {
+            let fw = ("99999" as NSString).size(withAttributes: valueAttrs).width
+            return ceil(max(lw, fw) + 2)
+        }
+        let vw = ("100%" as NSString).size(withAttributes: valueAttrs).width
         return ceil(max(lw, vw) + 2)
     }
 
     var fittingWidth: CGFloat {
         guard !chips.isEmpty else { return 40 }
-        return chips.map(chipWidth).reduce(0, +) + CGFloat(chips.count - 1) * gap + 4
+        return chips.map(chipWidth).reduce(0, +) + CGFloat(chips.count - 1) * gap + 2
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -662,16 +676,20 @@ final class ExtraView: NSView {
 
 struct HoverPad: NSViewRepresentable {
     var selected = false
+    var captureHits = false
+    var onClick: (() -> Void)? = nil
     func makeNSView(context: Context) -> HoverBG {
         let v = HoverBG()
         v.radius = 6
         v.selected = selected
-        v.captureHits = false
+        v.captureHits = captureHits
+        v.onClick = onClick
         return v
     }
     func updateNSView(_ v: HoverBG, context: Context) {
         v.selected = selected
-        v.captureHits = false
+        v.captureHits = captureHits
+        v.onClick = onClick
         v.needsDisplay = true
         v.updateTrackingAreas()
     }
@@ -795,9 +813,10 @@ struct Dashboard: View {
                     Sparkline(values: snap.cpuHistory, color: pal.accent)
                         .frame(height: 22)
                         .padding(.bottom, 1)
-                    MetricRow("User", pct0(snap.cpuUser), snap.cpuUser, pal)
-                    MetricRow("System", pct0(snap.cpuSystem), snap.cpuSystem, pal)
-                    MetricRow("Idle", pct0(max(0, 1 - snap.cpuUser - snap.cpuSystem)), max(0, 1 - snap.cpuUser - snap.cpuSystem), pal)
+                    let u = max(0, snap.cpuUser)
+                    let s = max(0, snap.cpuSystem)
+                    CPULoadBar(user: u, system: s, accent: NSColor(pal.accent), track: NSColor(pal.track))
+                        .frame(height: 8)
                 }
             }
             if shown("ram") {
@@ -1194,20 +1213,15 @@ struct Dashboard: View {
             tool("exclamationmark.triangle.fill", "Console", tint: .yellow) { App.shared.openUtil("Console") }
             tool("terminal.fill", "Terminal") { App.shared.openUtil("Terminal") }
             customTool
-            Button {
-                App.shared.cycleInterval()
-            } label: {
-                Text(intervalLabel)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Color.primary.opacity(0.8))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 20)
-                    .background(pal.track, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity)
-            .overlay { HoverPad() }
-            .help("Refresh interval — click to cycle")
+            Text(intervalLabel)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Color.primary.opacity(0.8))
+                .frame(maxWidth: .infinity)
+                .frame(height: 20)
+                .background(pal.track, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay { HoverPad(captureHits: true, onClick: { App.shared.cycleInterval() }) }
+                .help("Refresh interval — click to cycle")
+                .accessibilityAddTraits(.isButton)
             tool("circle.lefthalf.filled", "Theme") { App.shared.cycleTheme() }
             tool("gearshape.fill", "Settings") { app.openSettings() }
         }
@@ -1217,24 +1231,21 @@ struct Dashboard: View {
     }
 
     var customTool: some View {
-        Button { App.shared.openCustomApp() } label: {
-            Group {
-                if let img = app.prefs.customAppIcon {
-                    Image(nsImage: img).resizable().interpolation(.high).frame(width: 12, height: 12)
-                } else {
-                    Image(systemName: "plus.app")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.primary.opacity(0.75))
-                }
+        Group {
+            if let img = app.prefs.customAppIcon {
+                Image(nsImage: img).resizable().interpolation(.high).frame(width: 12, height: 12)
+            } else {
+                Image(systemName: "plus.app")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.primary.opacity(0.75))
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 20)
-            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(pal.track))
         }
-        .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
-        .overlay { HoverPad() }
+        .frame(height: 20)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(pal.track))
+        .overlay { HoverPad(captureHits: true, onClick: { App.shared.openCustomApp() }) }
         .help(app.prefs.customApp.isEmpty ? "Set toolbar app" : app.prefs.customAppName)
+        .accessibilityAddTraits(.isButton)
         .contextMenu {
             Button("Choose App…") { app.prefs.pickCustomApp() }
             if !app.prefs.customApp.isEmpty {
@@ -1249,21 +1260,19 @@ struct Dashboard: View {
     }
 
     func tool(_ name: String, _ tip: String, selected: Bool = false, tint: Color? = nil, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: name)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(tint ?? (selected ? pal.accent : Color.primary.opacity(0.75)))
-                .frame(maxWidth: .infinity)
-                .frame(height: 20)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(selected ? pal.accent.opacity(0.12) : pal.track)
-                )
-        }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity)
-        .overlay { HoverPad(selected: selected) }
-        .help(tip)
+        Image(systemName: name)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(tint ?? (selected ? pal.accent : Color.primary.opacity(0.75)))
+            .frame(maxWidth: .infinity)
+            .frame(height: 20)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(selected ? pal.accent.opacity(0.12) : pal.track)
+            )
+            .overlay { HoverPad(selected: selected, captureHits: true, onClick: action) }
+            .help(tip)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(tip)
     }
 
     func icon(_ img: NSImage?) -> some View {
@@ -1345,6 +1354,185 @@ struct Bar: View {
             }
         }
         .frame(height: 4)
+    }
+}
+
+struct CPULoadBar: NSViewRepresentable {
+    var user: Double
+    var system: Double
+    var accent: NSColor
+    var track: NSColor
+    func makeNSView(context: Context) -> CPULoadView {
+        let v = CPULoadView()
+        v.user = user; v.system = system; v.accent = accent; v.track = track
+        v.frost = Prefs.shared.frostMaterial
+        v.stroke = Prefs.shared.strokeNS
+        return v
+    }
+    func updateNSView(_ v: CPULoadView, context: Context) {
+        v.user = user; v.system = system; v.accent = accent; v.track = track
+        v.frost = Prefs.shared.frostMaterial
+        v.stroke = Prefs.shared.strokeNS
+        v.needsDisplay = true
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: CPULoadView, context: Context) -> CGSize {
+        CGSize(width: proposal.width ?? 200, height: 8)
+    }
+}
+
+final class CPULoadView: NSView {
+    var user = 0.0
+    var system = 0.0
+    var accent = NSColor.systemBlue
+    var track = NSColor.white.withAlphaComponent(0.12)
+    var frost = NSVisualEffectView.Material.hudWindow
+    var stroke = NSColor.labelColor.withAlphaComponent(0.22)
+    private var hover = 0 { didSet { if oldValue != hover { needsDisplay = true; updateTip() } } }
+    private var tip: NSPanel?
+    private let tipFrost: NSVisualEffectView = {
+        let v = NSVisualEffectView()
+        v.state = .active
+        v.blendingMode = .behindWindow
+        v.wantsLayer = true
+        v.layer?.cornerRadius = 8
+        v.layer?.cornerCurve = .continuous
+        v.layer?.masksToBounds = true
+        return v
+    }()
+    private let tipLab: NSTextField = {
+        let t = NSTextField(labelWithString: "")
+        t.font = .systemFont(ofSize: 12, weight: .regular)
+        t.textColor = .secondaryLabelColor
+        t.drawsBackground = false
+        t.isBordered = false
+        t.alignment = .center
+        return t
+    }()
+    override var isOpaque: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(point) ? self : nil }
+    override func updateTrackingAreas() {
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateTrackingAreas()
+    }
+    override func layout() {
+        super.layout()
+        updateTrackingAreas()
+    }
+    override func mouseMoved(with event: NSEvent) {
+        let x = convert(event.locationInWindow, from: nil).x
+        hover = seg(at: x)
+    }
+    override func mouseEntered(with event: NSEvent) {
+        mouseMoved(with: event)
+    }
+    override func mouseExited(with event: NSEvent) { hover = 0 }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { hideTip() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+    deinit { hideTip() }
+    private func seg(at x: CGFloat) -> Int {
+        let w = max(bounds.width, 1)
+        let u = CGFloat(min(1, max(0, user))) * w
+        let s = CGFloat(min(1, max(0, system))) * w
+        if x < u { return 1 }
+        if x < u + s { return 2 }
+        return 3
+    }
+    private func hideTip() {
+        tip?.orderOut(nil)
+    }
+    private func updateTip() {
+        guard hover != 0, let win = window else { hideTip(); return }
+        let u = Int((user * 100).rounded())
+        let s = Int((system * 100).rounded())
+        let i = max(0, 100 - u - s)
+        let text: String
+        switch hover {
+        case 1: text = "User \(u)%"
+        case 2: text = "System \(s)%"
+        default: text = "Idle \(i)%"
+        }
+        tipLab.stringValue = text
+        tipLab.sizeToFit()
+        let padX: CGFloat = 10
+        let padY: CGFloat = 5
+        let sz = NSSize(width: tipLab.frame.width + padX * 2, height: tipLab.frame.height + padY * 2)
+        tipLab.frame = NSRect(x: padX, y: padY, width: tipLab.frame.width, height: tipLab.frame.height)
+        tipFrost.material = frost
+        let px = 1 / (window?.backingScaleFactor ?? 2)
+        tipFrost.layer?.borderWidth = px
+        tipFrost.layer?.borderColor = stroke.cgColor
+        if tip == nil {
+            tipFrost.addSubview(tipLab)
+            let p = NSPanel(
+                contentRect: NSRect(origin: .zero, size: sz),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            p.isOpaque = false
+            p.backgroundColor = .clear
+            p.hasShadow = false
+            p.hidesOnDeactivate = false
+            p.isFloatingPanel = true
+            p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+            p.contentView = tipFrost
+            tip = p
+        }
+        tipFrost.frame = NSRect(origin: .zero, size: sz)
+        tip?.setContentSize(sz)
+        tip?.level = NSWindow.Level(rawValue: win.level.rawValue + 1)
+        let uw = CGFloat(min(1, max(0, user))) * bounds.width
+        let sw = CGFloat(min(1, max(0, system))) * bounds.width
+        let mid: CGFloat
+        switch hover {
+        case 1: mid = uw / 2
+        case 2: mid = uw + sw / 2
+        default: mid = uw + sw + max(0, bounds.width - uw - sw) / 2
+        }
+        let top = NSPoint(x: mid, y: isFlipped ? 0 : bounds.height)
+        let inWin = convert(top, to: nil)
+        let scr = win.convertToScreen(NSRect(origin: inWin, size: .zero)).origin
+        let x = scr.x - sz.width / 2
+        let y = scr.y + 8
+        tip?.setFrame(NSRect(x: x, y: y, width: sz.width, height: sz.height), display: true)
+        tip?.orderFrontRegardless()
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds
+        let rad = r.height / 2
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: r, xRadius: rad, yRadius: rad).addClip()
+        track.setFill(); r.fill()
+        let u = CGFloat(min(1, max(0, user))) * r.width
+        let s = CGFloat(min(1, max(0, system))) * r.width
+        accent.withAlphaComponent(0.45).setFill()
+        NSRect(x: r.minX, y: r.minY, width: u + s, height: r.height).fill()
+        accent.setFill()
+        NSRect(x: r.minX, y: r.minY, width: u, height: r.height).fill()
+        if hover != 0 {
+            NSColor.white.withAlphaComponent(0.28).setFill()
+            let x0: CGFloat
+            let w: CGFloat
+            switch hover {
+            case 1: x0 = r.minX; w = u
+            case 2: x0 = r.minX + u; w = s
+            default: x0 = r.minX + u + s; w = r.width - u - s
+            }
+            NSRect(x: x0, y: r.minY, width: max(w, 0), height: r.height).fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
     }
 }
 

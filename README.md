@@ -30,9 +30,13 @@
 
 ## OS Requirement
 
-macOS 14+ on Apple Silicon. Xcode Command Line Tools for install-from-source.
+macOS 14+ on Apple Silicon. Command Line Tools only if you build from source.
 
 ## Installation
+
+### Download
+
+[Latest release](https://github.com/Aduersarius/sino/releases/latest) — `Sino.app.zip` (Apple Silicon, unsigned).
 
 ### One line
 
@@ -40,7 +44,7 @@ macOS 14+ on Apple Silicon. Xcode Command Line Tools for install-from-source.
 curl -fsSL https://raw.githubusercontent.com/Aduersarius/sino/main/install.sh | bash
 ```
 
-Builds from `main`, copies `Sino.app` to `/Applications`, opens it.
+Prefers the release zip; falls back to building `main`. Copies to `/Applications`, opens it.
 
 ### Homebrew
 

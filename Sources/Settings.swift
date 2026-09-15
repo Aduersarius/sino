@@ -832,12 +832,15 @@ final class HoverBG: NSView {
     var radius: CGFloat = 8
     var hugPopup = false
     var captureHits = false
+    var onClick: (() -> Void)?
     var selected = false { didSet { needsDisplay = true } }
     private var hovering = false { didSet { needsDisplay = true } }
+    private var tracking = false
+    private var pressed = false { didSet { needsDisplay = true } }
     override var isOpaque: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? {
-        captureHits && bounds.contains(point) ? self : nil
+        (captureHits || onClick != nil) && bounds.contains(point) ? self : nil
     }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -859,12 +862,32 @@ final class HoverBG: NSView {
     override func mouseEntered(with event: NSEvent) { hovering = true }
     override func mouseExited(with event: NSEvent) { hovering = false }
     override func mouseDown(with event: NSEvent) {
+        if onClick != nil {
+            tracking = true
+            pressed = true
+            return
+        }
         guard captureHits else { return }
         forward(event) { $0.mouseDown(with: $1) }
     }
+    override func mouseDragged(with event: NSEvent) {
+        guard tracking else { return }
+        pressed = targetRect().contains(convert(event.locationInWindow, from: nil))
+    }
     override func mouseUp(with event: NSEvent) {
+        if let onClick {
+            let go = tracking && targetRect().contains(convert(event.locationInWindow, from: nil))
+            tracking = false
+            pressed = false
+            if go { onClick() }
+            return
+        }
         guard captureHits else { return }
         forward(event) { $0.mouseUp(with: $1) }
+    }
+    override func rightMouseDown(with event: NSEvent) {
+        guard onClick != nil || captureHits else { return }
+        forward(event) { $0.rightMouseDown(with: $1) }
     }
     private func forward(_ event: NSEvent, _ send: (NSView, NSEvent) -> Void) {
         guard let content = window?.contentView else { return }
@@ -875,7 +898,8 @@ final class HoverBG: NSView {
     }
     override func draw(_ dirtyRect: NSRect) {
         let a: CGFloat
-        if selected && hovering { a = 0.12 }
+        if pressed { a = 0.22 }
+        else if selected && hovering { a = 0.12 }
         else if selected { a = 0.08 }
         else if hovering { a = 0.10 }
         else { return }
