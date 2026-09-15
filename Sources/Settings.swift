@@ -418,6 +418,10 @@ struct SettingsRoot: View {
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
+                Divider().padding(.leading, 14)
+                row("Quit Sino") {
+                    Button("Quit") { NSApp.terminate(nil) }
+                }
             }
             section("Toolbar") {
                 row("Shortcut app") {
