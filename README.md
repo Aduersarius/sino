@@ -21,47 +21,16 @@
   <img src="docs/dropdown.png" alt="Dropdown" width="240">
 </p>
 
----
+## Highlights
 
-## Ultra-Lightweight by Design
+- **Ultra-lightweight:** ~30 MB RAM, 2.7 MB bundle, <1% idle CPU. Zero external dependencies.
+- **Adaptive:** Process tables and heavy metrics run only while the dropdown is open.
+- **Menu-bar chips:** CPU, GPU, RAM, SSD, network ↑↓, fans, battery — customizable and reorderable.
+- **Side panels:** Hover any card for detailed core, process, or network diagnostics.
+- **SMC integration:** Real-time fan speeds and thermal sensors.
+- **Customizable:** Light/Dark/System themes with dynamic icon, liquid glass frost, refresh interval (0.5s–5s), and app shortcuts.
 
-Unlike Electron-based utilities that idle at 400MB+ RAM and waste battery cycles, Sino is engineered from the ground up for minimal overhead:
-
-- **~30 MB Resident Memory (RSS):** Extremely lean memory footprint.
-- **Tiny 2.7 MB App Bundle:** Single 1.6 MB Mach-O binary. Zero npm dependencies, zero SPM packages.
-- **Sub-1% Idle CPU:** Runs in the background without draining your Mac's battery or spinning fans.
-- **Adaptive Sampling:** Heavy per-process profiling (top CPU, memory, energy, and nettop tables) and deep filesystem scans run **only** when the dropdown dashboard is open. When closed, it rests in low-overhead monitoring mode.
-- **Pure Native Darwin & Mach Primitives:** Direct kernel syscalls (`statfs`, `host_processor_info`, `host_statistics64`), IOKit accelerator queries, and direct Apple SMC C bridging. No external shell commands (`top`, `ps`, `df`) spawned.
-
----
-
-## Deep Customization
-
-Tailor Sino to match your workflow and macOS aesthetic:
-
-- **Modular Menu Bar Chips:** Choose exactly what appears on your menu bar (CPU, GPU, RAM, SSD, Network ↑↓, Fans, Battery) and drag to reorder.
-- **Dynamic Theme Switcher:** Instant toggle between **Light**, **Dark**, and **System** modes with an adaptive toolbar icon.
-- **Liquid Glass & Materials:** Configurable frosted glass backdrops (HUD, Menu, Popover, Sidebar, Window) with custom tint colors and opacity.
-- **Adjustable Refresh Intervals:** Cycle between **0.5s**, **1s**, **2s**, and **5s** polling speeds with a single click in the toolbar.
-- **Custom App Shortcuts:** Pin your favorite utility or diagnostic apps directly to the dropdown toolbar for 1-click launching.
-
----
-
-## Core Monitoring Features
-
-- **CPU & Performance Cores:** Real-time load, sparkline history, and individual breakdowns for **Performance (P-cores)** and **Efficiency (E-cores)** on Apple Silicon.
-- **Memory & Swap:** Live tracking of wired, active, compressed, and swap memory with memory pressure indicators.
-- **GPU & Metal Acceleration:** Real-time GPU utilization %, renderer and tiler engines, allocated and in-use VRAM, and core count.
-- **Network Bandwidth & Diagnostics:** Real-time download/upload speeds, peak counters, Wi-Fi SSID, public & local IPv4/IPv6, router gateway IP, and hardware MAC address.
-- **Disk & Storage Health:** Instant capacity usage, free space, and mounted volume list.
-- **Thermals & Fans:** Direct Apple SMC register reads for real-time fan RPMs and sensor temperatures.
-- **Battery & Power:** Live charge percentage, health rating, cycle count, and AC charging status.
-- **Interactive Side Detail Panels:** Hover over any card in the main dropdown to slide out deep diagnostic inspection panels.
-- **Top Process Inspector:** Spot resource hogs instantly with on-demand top CPU, Memory, Energy, and Network processes.
-
----
-
-## OS Requirements
+## OS Requirement
 
 macOS 14+ on Apple Silicon (M1/M2/M3/M4). Command Line Tools only if compiling from source.
 
