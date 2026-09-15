@@ -2,6 +2,8 @@ import AppKit
 import Combine
 import ServiceManagement
 import SwiftUI
+import UniformTypeIdentifiers
+import UserNotifications
 
 final class Prefs: ObservableObject {
     static let shared = Prefs()
@@ -61,6 +63,34 @@ final class Prefs: ObservableObject {
         customApp = d.string(forKey: "pulse.customApp") ?? ""
         if bar.isEmpty { bar = ["ram", "cpu"] }
         if drop.isEmpty { drop = ["cpu"] }
+        if d.object(forKey: "pulse.frost.light") == nil { writeSlot(false) }
+        if d.object(forKey: "pulse.frost.dark") == nil { writeSlot(true) }
+        loadSlot()
+    }
+
+    func isDark() -> Bool {
+        let t = UserDefaults.standard.string(forKey: "theme") ?? "system"
+        if t == "light" { return false }
+        if t == "dark" { return true }
+        return NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
+    func writeSlot(_ dark: Bool? = nil) {
+        let s = (dark ?? isDark()) ? "dark" : "light"
+        let d = UserDefaults.standard
+        d.set(frost, forKey: "pulse.frost.\(s)")
+        d.set(frostTint, forKey: "pulse.frostTint.\(s)")
+        d.set(frostBehind, forKey: "pulse.frostBehind.\(s)")
+        d.set(colors, forKey: "pulse.colors.\(s)")
+    }
+
+    func loadSlot(_ dark: Bool? = nil) {
+        let s = (dark ?? isDark()) ? "dark" : "light"
+        let d = UserDefaults.standard
+        frost = d.string(forKey: "pulse.frost.\(s)") ?? frost
+        frostTint = d.object(forKey: "pulse.frostTint.\(s)") as? Double ?? frostTint
+        frostBehind = d.object(forKey: "pulse.frostBehind.\(s)") as? Bool ?? frostBehind
+        if let c = d.object(forKey: "pulse.colors.\(s)") as? [String: [Double]] { colors = c }
     }
 
     func save() {
@@ -75,6 +105,7 @@ final class Prefs: ObservableObject {
         d.set(frostTint, forKey: "pulse.frostTint")
         d.set(frostBehind, forKey: "pulse.frostBehind")
         d.set(customApp, forKey: "pulse.customApp")
+        writeSlot()
     }
 
     func barBind(_ id: String) -> Binding<Bool> {
@@ -187,7 +218,7 @@ final class Prefs: ObservableObject {
         p.canChooseFiles = true
         p.canChooseDirectories = false
         p.allowsMultipleSelection = false
-        p.allowedFileTypes = ["app"]
+        p.allowedContentTypes = [.application]
         p.directoryURL = URL(fileURLWithPath: "/Applications")
         p.prompt = "Choose"
         p.message = "App for the dropdown toolbar"
@@ -222,12 +253,99 @@ enum Chrome {
     static let title: Font = .system(size: 16, weight: .semibold)
     static let section: Font = .system(size: 13, weight: .semibold)
     static let caption: Font = .system(size: 11)
-    static let rail: CGFloat = 208
+    static let rail: CGFloat = 176
 } 
+
+final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
+    static let shared = Updater()
+    static let repo = "Aduersarius/sino"
+    @Published var status = "—"
+    @Published var updateURL: URL?
+
+    var current: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+    }
+
+    private override init() { super.init() }
+
+    func start() {
+        let c = UNUserNotificationCenter.current()
+        c.delegate = self
+        c.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        check(notify: true)
+        Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            self?.check(notify: true)
+        }
+    }
+
+    func check(notify: Bool = false) {
+        status = "Checking…"
+        if !notify { updateURL = nil }
+        guard let url = URL(string: "https://api.github.com/repos/\(Updater.repo)/releases/latest") else { return }
+        var req = URLRequest(url: url)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            DispatchQueue.main.async {
+                if let err {
+                    self.status = err.localizedDescription
+                    return
+                }
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                if code == 404 {
+                    self.status = "No GitHub releases yet"
+                    return
+                }
+                guard let data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let tag = json["tag_name"] as? String else {
+                    self.status = "Couldn't read GitHub"
+                    return
+                }
+                let latest = tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+                if let html = json["html_url"] as? String { self.updateURL = URL(string: html) }
+                if latest.compare(self.current, options: .numeric) == .orderedDescending {
+                    self.status = "\(latest) available"
+                    if notify { self.ping(latest) }
+                } else {
+                    self.status = "Up to date"
+                }
+            }
+        }.resume()
+    }
+
+    private func ping(_ latest: String) {
+        let key = "pulse.update.notifiedTag"
+        if UserDefaults.standard.string(forKey: key) == latest { return }
+        UserDefaults.standard.set(latest, forKey: key)
+        let c = UNMutableNotificationContent()
+        c.title = "Sino"
+        c.body = "Version \(latest) is ready on GitHub"
+        c.sound = .default
+        let req = UNNotificationRequest(identifier: "sino.update.\(latest)", content: c, trigger: nil)
+        UNUserNotificationCenter.current().add(req)
+    }
+
+    func openUpdate() {
+        if let u = updateURL { NSWorkspace.shared.open(u) }
+        else if let u = URL(string: "https://github.com/\(Updater.repo)/releases") {
+            NSWorkspace.shared.open(u)
+        }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        openUpdate()
+        completionHandler()
+    }
+}
 
 struct SettingsRoot: View {
     @ObservedObject var app: App
     @ObservedObject var prefs: Prefs
+    @ObservedObject var updater = Updater.shared
 
     var page: String { app.settingsPage }
     var dark: Bool { app.currentScheme == .dark }
@@ -235,60 +353,27 @@ struct SettingsRoot: View {
     var body: some View {
         HStack(spacing: 0) {
             sidebar
-                .padding(8)
-                .frame(width: Chrome.rail, alignment: .top)
-                .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Chrome.sidebar(dark))
-                )
-                .padding(.top, 36)
-                .padding(.leading, 10)
+                .padding(.top, 38)
+                .padding(.horizontal, 10)
                 .padding(.bottom, 10)
-                .padding(.trailing, 6)
-            VStack(alignment: .leading, spacing: 8) {
-                header
-                if page == "appear" {
-                    ScrollView {
-                        pageBody
-                    }
-                    .scrollContentBackground(.hidden)
-                    .contentMargins(.all, 0, for: .scrollContent)
-                } else {
-                    pageBody
-                }
+                .frame(width: Chrome.rail, alignment: .top)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .background(Chrome.sidebar(dark))
+            ScrollView {
+                pageBody
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 38)
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 32)
             }
-            .padding(.top, 36)
-            .padding(.leading, 16)
-            .padding(.trailing, 16)
-            .padding(.bottom, 14)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .scrollContentBackground(.hidden)
+            .contentMargins(.all, 0, for: .scrollContent)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(width: 640, height: 400)
+        .ignoresSafeArea(.container, edges: .top)
+        .frame(width: 600, height: 360)
         .background(Chrome.window(dark))
         .preferredColorScheme(app.currentScheme)
-    }
-
-    var header: some View {
-        let title = page == "appear" ? "Appearance"
-            : page == "bar" ? "Menu Bar"
-            : page == "drop" ? "Dropdown"
-            : "General"
-        let icon = page == "appear" ? "paintpalette.fill"
-            : page == "bar" ? "menubar.rectangle"
-            : page == "drop" ? "rectangle.split.2x1"
-            : "gearshape.fill"
-        let color: Color = page == "appear" ? Color(red: 1.0, green: 0.35, blue: 0.55)
-            : page == "bar" ? Color(red: 0.20, green: 0.48, blue: 1.0)
-            : page == "drop" ? Color(red: 0.62, green: 0.35, blue: 0.95)
-            : Color(red: 0.55, green: 0.55, blue: 0.58)
-        return HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 24, height: 24)
-                .background(color, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            Text(title).font(Chrome.title)
-        }
     }
 
     @ViewBuilder
@@ -297,6 +382,7 @@ struct SettingsRoot: View {
         case "appear": appearancePage
         case "bar": barPage
         case "drop": modulesPage(bind: prefs.dropBind)
+        case "about": aboutPage
         default: generalPage
         }
     }
@@ -461,12 +547,62 @@ struct SettingsRoot: View {
         }
     }
 
+    var aboutPage: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            section("Sino") {
+                row("Version") {
+                    Text(updater.current).font(Chrome.caption).foregroundStyle(.secondary)
+                }
+                Divider().padding(.leading, 14)
+                row("Updates") {
+                    Button("Check") { updater.check() }
+                }
+                if updater.status != "—" {
+                    Text(updater.status)
+                        .font(Chrome.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 10)
+                }
+                if updater.updateURL != nil {
+                    Divider().padding(.leading, 14)
+                    row("Release") {
+                        Button("Open") { updater.openUpdate() }
+                    }
+                }
+            }
+            section("Source") {
+                row("GitHub") {
+                    Button("Aduersarius/sino") { openURL("https://github.com/Aduersarius/sino") }
+                }
+            }
+            section("Contact") {
+                row("Author") {
+                    Text("Nikolay Golovin").font(Chrome.text).foregroundStyle(.secondary)
+                }
+                Divider().padding(.leading, 14)
+                row("GitHub") {
+                    Button("@Aduersarius") { openURL("https://github.com/Aduersarius") }
+                }
+                Divider().padding(.leading, 14)
+                row("Web") {
+                    Button("pariflow.com") { openURL("https://pariflow.com") }
+                }
+            }
+        }
+    }
+
+    func openURL(_ s: String) {
+        if let u = URL(string: s) { NSWorkspace.shared.open(u) }
+    }
+
     var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
             nav("general", "General", "gearshape.fill", Color(red: 0.55, green: 0.55, blue: 0.58))
             nav("appear", "Appearance", "paintpalette.fill", Color(red: 1.0, green: 0.35, blue: 0.55))
             nav("bar", "Menu Bar", "menubar.rectangle", Color(red: 0.20, green: 0.48, blue: 1.0))
             nav("drop", "Dropdown", "rectangle.split.2x1", Color(red: 0.62, green: 0.35, blue: 0.95))
+            nav("about", "About", "info.circle.fill", Color(red: 0.20, green: 0.52, blue: 0.96))
             Spacer(minLength: 0)
         }
     }
@@ -731,10 +867,11 @@ final class HoverBG: NSView {
         forward(event) { $0.mouseUp(with: $1) }
     }
     private func forward(_ event: NSEvent, _ send: (NSView, NSEvent) -> Void) {
+        guard let content = window?.contentView else { return }
         isHidden = true
         defer { isHidden = false }
-        let p = superview?.convert(event.locationInWindow, from: nil) ?? .zero
-        if let v = superview?.hitTest(p) { send(v, event) }
+        let p = content.convert(event.locationInWindow, from: nil)
+        if let v = content.hitTest(p), v !== self { send(v, event) }
     }
     override func draw(_ dirtyRect: NSRect) {
         let a: CGFloat

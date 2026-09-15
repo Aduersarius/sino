@@ -38,9 +38,22 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     private var settingsWC: NSWindowController?
     private var dropOpen = false
     private var ignoreClicksUntil = Date.distantPast
+    private var lastDark = false
+    private var appearObs: NSKeyValueObservation?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyTheme()
+        lastDark = currentScheme == .dark
+        appearObs = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+            guard let self, self.theme == "system" else { return }
+            let dark = self.currentScheme == .dark
+            guard dark != self.lastDark else { return }
+            self.prefs.writeSlot(self.lastDark)
+            self.lastDark = dark
+            self.prefs.loadSlot(dark)
+            self.applyStroke()
+        }
+        Updater.shared.start()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Sino", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
@@ -258,9 +271,13 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func setTheme(_ t: String) {
+        prefs.writeSlot(currentScheme == .dark)
         theme = t
         UserDefaults.standard.set(t, forKey: "theme")
+        lastDark = currentScheme == .dark
+        prefs.loadSlot(lastDark)
         applyTheme()
+        applyStroke()
     }
 
     func cycleInterval() {
@@ -295,6 +312,15 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             if let u = URL(string: s), NSWorkspace.shared.open(u) { return }
         }
         openUtil("System Settings")
+    }
+
+    func openCustomApp() {
+        let path = prefs.customApp
+        if path.isEmpty || !FileManager.default.fileExists(atPath: path) {
+            prefs.pickCustomApp()
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
     func applyTheme() {
@@ -461,16 +487,18 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     func openSettings() {
         hideDrop()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
         if settingsWC == nil {
             let vc = NSHostingController(rootView: SettingsRoot(app: self, prefs: prefs))
             let w = NSWindow(contentViewController: vc)
             w.title = "Sino"
-            w.styleMask = [.titled, .closable, .fullSizeContentView]
+            w.styleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
             w.titlebarAppearsTransparent = true
             w.titleVisibility = .hidden
             w.isReleasedWhenClosed = false
             w.acceptsMouseMovedEvents = true
-            w.setContentSize(NSSize(width: 640, height: 400))
+            w.setContentSize(NSSize(width: 600, height: 360))
             w.center()
             settingsWC = NSWindowController(window: w)
             NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
@@ -478,10 +506,9 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
                 NSApp.setActivationPolicy(.accessory)
             }
         }
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
         settingsWC?.showWindow(nil)
         settingsWC?.window?.makeKeyAndOrderFront(nil)
+        settingsWC?.window?.orderFrontRegardless()
     }
 }
 
@@ -639,12 +666,12 @@ struct HoverPad: NSViewRepresentable {
         let v = HoverBG()
         v.radius = 6
         v.selected = selected
-        v.captureHits = true
+        v.captureHits = false
         return v
     }
     func updateNSView(_ v: HoverBG, context: Context) {
         v.selected = selected
-        v.captureHits = true
+        v.captureHits = false
         v.needsDisplay = true
         v.updateTrackingAreas()
     }
@@ -1166,17 +1193,19 @@ struct Dashboard: View {
             tool("waveform.path.ecg", "Activity Monitor") { App.shared.openUtil("Activity Monitor") }
             tool("exclamationmark.triangle.fill", "Console", tint: .yellow) { App.shared.openUtil("Console") }
             tool("terminal.fill", "Terminal") { App.shared.openUtil("Terminal") }
+            customTool
             Button {
                 App.shared.cycleInterval()
             } label: {
                 Text(intervalLabel)
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Color.primary.opacity(0.8))
-                    .frame(minWidth: 28)
+                    .frame(maxWidth: .infinity)
                     .frame(height: 20)
                     .background(pal.track, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
             .overlay { HoverPad() }
             .help("Refresh interval — click to cycle")
             tool("circle.lefthalf.filled", "Theme") { App.shared.cycleTheme() }
@@ -1185,6 +1214,33 @@ struct Dashboard: View {
         .padding(4)
         .frame(maxWidth: .infinity)
         .background(pal.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    var customTool: some View {
+        Button { App.shared.openCustomApp() } label: {
+            Group {
+                if let img = app.prefs.customAppIcon {
+                    Image(nsImage: img).resizable().interpolation(.high).frame(width: 12, height: 12)
+                } else {
+                    Image(systemName: "plus.app")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.primary.opacity(0.75))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 20)
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(pal.track))
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .overlay { HoverPad() }
+        .help(app.prefs.customApp.isEmpty ? "Set toolbar app" : app.prefs.customAppName)
+        .contextMenu {
+            Button("Choose App…") { app.prefs.pickCustomApp() }
+            if !app.prefs.customApp.isEmpty {
+                Button("Clear", role: .destructive) { app.prefs.clearCustomApp() }
+            }
+        }
     }
 
     var intervalLabel: String {
@@ -1197,13 +1253,15 @@ struct Dashboard: View {
             Image(systemName: name)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(tint ?? (selected ? pal.accent : Color.primary.opacity(0.75)))
-                .frame(width: 24, height: 20)
+                .frame(maxWidth: .infinity)
+                .frame(height: 20)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(selected ? pal.accent.opacity(0.12) : pal.track)
                 )
         }
         .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
         .overlay { HoverPad(selected: selected) }
         .help(tip)
     }

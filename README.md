@@ -13,7 +13,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/preview.png" alt="Preview" width="380">
+  <img src="docs/menubar.png" alt="Menu bar" width="420">
+</p>
+<p align="center">
+  <img src="docs/dropdown.png" alt="Dropdown" width="320">
 </p>
 
 ## Highlights
