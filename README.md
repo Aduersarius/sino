@@ -12,7 +12,9 @@
   <img src="https://img.shields.io/badge/arch-Apple%20Silicon-black?style=flat-square" alt="Apple Silicon">
 </p>
 
-![Preview](docs/preview.png)
+<p align="center">
+  <img src="docs/preview.png" alt="Preview" width="380">
+</p>
 
 ## Highlights
 
