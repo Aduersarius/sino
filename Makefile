@@ -2,7 +2,7 @@ SDK    := $(shell xcrun --show-sdk-path)
 TARGET := arm64-apple-macos14.0
 APP    := Sino.app
 BIN    := $(APP)/Contents/MacOS/Sino
-SRC    := Sources/Sampler.swift Sources/PulseApp.swift Sources/SMC.c
+SRC    := Sources/Sampler.swift Sources/SinoApp.swift Sources/SMC.c
 
 .PHONY: all run dump clean
 

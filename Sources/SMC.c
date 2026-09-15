@@ -54,7 +54,7 @@ static int smc_read(const char *key, void *buf, int buflen, UInt32 *type_out, UI
     return n;
 }
 
-int pulse_smc_init(void) {
+int sino_smc_init(void) {
     if (g_conn) return 0;
     io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"));
     if (!svc) return -1;
@@ -63,14 +63,14 @@ int pulse_smc_init(void) {
     return kr == KERN_SUCCESS ? 0 : -1;
 }
 
-void pulse_smc_shutdown(void) {
+void sino_smc_shutdown(void) {
     if (g_conn) {
         IOServiceClose(g_conn);
         g_conn = 0;
     }
 }
 
-int pulse_smc_fans(float *rpm, float *maxrpm, int cap) {
+int sino_smc_fans(float *rpm, float *maxrpm, int cap) {
     if (!g_conn || cap <= 0) return 0;
     unsigned char nbuf = 0;
     if (smc_read("FNum", &nbuf, 1, NULL, NULL) < 0) return 0;
@@ -89,7 +89,7 @@ int pulse_smc_fans(float *rpm, float *maxrpm, int cap) {
     return n;
 }
 
-int pulse_smc_temps(char *names32, float *celsius, int cap) {
+int sino_smc_temps(char *names32, float *celsius, int cap) {
     static const struct { const char *key; const char *name; } keys[] = {
         {"Tp01", "CPU"},
         {"Tp05", "CPU"},
@@ -129,7 +129,7 @@ int pulse_smc_temps(char *names32, float *celsius, int cap) {
 #include <stdio.h>
 #include <sys/resource.h>
 
-int pulse_pid_energy_nj(int pid, uint64_t *nanojoules) {
+int sino_pid_energy_nj(int pid, uint64_t *nanojoules) {
     struct rusage_info_v6 ru;
     memset(&ru, 0, sizeof(ru));
     if (proc_pid_rusage(pid, RUSAGE_INFO_V6, (rusage_info_t *)&ru) != 0) return -1;
@@ -137,7 +137,7 @@ int pulse_pid_energy_nj(int pid, uint64_t *nanojoules) {
     return 0;
 }
 
-int pulse_pid_footprint(int pid, uint64_t *bytes) {
+int sino_pid_footprint(int pid, uint64_t *bytes) {
     struct rusage_info_v6 ru;
     memset(&ru, 0, sizeof(ru));
     if (proc_pid_rusage(pid, RUSAGE_INFO_V6, (rusage_info_t *)&ru) != 0) return -1;

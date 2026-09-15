@@ -38,33 +38,33 @@ final class Prefs: ObservableObject {
 
     private init() {
         let d = UserDefaults.standard
-        interval = d.object(forKey: "pulse.interval") as? Double ?? 1
-        bar = Set(d.stringArray(forKey: "pulse.bar") ?? ["ram", "cpu"])
+        interval = (d.object(forKey: "sino.interval") ?? d.object(forKey: "pulse.interval")) as? Double ?? 1
+        bar = Set(d.stringArray(forKey: "sino.bar") ?? d.stringArray(forKey: "pulse.bar") ?? ["ram", "cpu"])
         let ids = Prefs.modules.map(\.id)
-        var order = d.stringArray(forKey: "pulse.barOrder") ?? []
+        var order = d.stringArray(forKey: "sino.barOrder") ?? d.stringArray(forKey: "pulse.barOrder") ?? []
         order = order.filter { ids.contains($0) }
         for id in ids where !order.contains(id) { order.append(id) }
         barOrder = order
-        drop = Set(d.stringArray(forKey: "pulse.drop") ?? Prefs.modules.map(\.id))
-        login = d.bool(forKey: "pulse.login")
-        var cols = d.object(forKey: "pulse.colors") as? [String: [Double]] ?? [:]
-        if cols["outline"] == nil, d.object(forKey: "pulse.strokeA") != nil {
+        drop = Set(d.stringArray(forKey: "sino.drop") ?? d.stringArray(forKey: "pulse.drop") ?? Prefs.modules.map(\.id))
+        login = (d.object(forKey: "sino.login") ?? d.object(forKey: "pulse.login")) as? Bool ?? false
+        var cols = (d.object(forKey: "sino.colors") ?? d.object(forKey: "pulse.colors")) as? [String: [Double]] ?? [:]
+        if cols["outline"] == nil, (d.object(forKey: "sino.strokeA") ?? d.object(forKey: "pulse.strokeA")) != nil {
             cols["outline"] = [
-                d.double(forKey: "pulse.strokeR"),
-                d.double(forKey: "pulse.strokeG"),
-                d.double(forKey: "pulse.strokeB"),
-                d.double(forKey: "pulse.strokeA")
+                d.double(forKey: "sino.strokeR"),
+                d.double(forKey: "sino.strokeG"),
+                d.double(forKey: "sino.strokeB"),
+                d.double(forKey: "sino.strokeA")
             ]
         }
         colors = cols
-        frost = d.string(forKey: "pulse.frost") ?? "hud"
-        frostTint = d.object(forKey: "pulse.frostTint") as? Double ?? 0
-        frostBehind = d.object(forKey: "pulse.frostBehind") as? Bool ?? true
-        customApp = d.string(forKey: "pulse.customApp") ?? ""
+        frost = d.string(forKey: "sino.frost") ?? d.string(forKey: "pulse.frost") ?? "hud"
+        frostTint = (d.object(forKey: "sino.frostTint") ?? d.object(forKey: "pulse.frostTint")) as? Double ?? 0
+        frostBehind = (d.object(forKey: "sino.frostBehind") ?? d.object(forKey: "pulse.frostBehind")) as? Bool ?? true
+        customApp = d.string(forKey: "sino.customApp") ?? d.string(forKey: "pulse.customApp") ?? ""
         if bar.isEmpty { bar = ["ram", "cpu"] }
         if drop.isEmpty { drop = ["cpu"] }
-        if d.object(forKey: "pulse.frost.light") == nil { writeSlot(false) }
-        if d.object(forKey: "pulse.frost.dark") == nil { writeSlot(true) }
+        if d.object(forKey: "sino.frost.light") == nil && d.object(forKey: "pulse.frost.light") == nil { writeSlot(false) }
+        if d.object(forKey: "sino.frost.dark") == nil && d.object(forKey: "pulse.frost.dark") == nil { writeSlot(true) }
         loadSlot()
     }
 
@@ -78,33 +78,33 @@ final class Prefs: ObservableObject {
     func writeSlot(_ dark: Bool? = nil) {
         let s = (dark ?? isDark()) ? "dark" : "light"
         let d = UserDefaults.standard
-        d.set(frost, forKey: "pulse.frost.\(s)")
-        d.set(frostTint, forKey: "pulse.frostTint.\(s)")
-        d.set(frostBehind, forKey: "pulse.frostBehind.\(s)")
-        d.set(colors, forKey: "pulse.colors.\(s)")
+        d.set(frost, forKey: "sino.frost.\(s)")
+        d.set(frostTint, forKey: "sino.frostTint.\(s)")
+        d.set(frostBehind, forKey: "sino.frostBehind.\(s)")
+        d.set(colors, forKey: "sino.colors.\(s)")
     }
 
     func loadSlot(_ dark: Bool? = nil) {
         let s = (dark ?? isDark()) ? "dark" : "light"
         let d = UserDefaults.standard
-        frost = d.string(forKey: "pulse.frost.\(s)") ?? frost
-        frostTint = d.object(forKey: "pulse.frostTint.\(s)") as? Double ?? frostTint
-        frostBehind = d.object(forKey: "pulse.frostBehind.\(s)") as? Bool ?? frostBehind
-        if let c = d.object(forKey: "pulse.colors.\(s)") as? [String: [Double]] { colors = c }
+        frost = d.string(forKey: "sino.frost.\(s)") ?? d.string(forKey: "pulse.frost.\(s)") ?? frost
+        frostTint = (d.object(forKey: "sino.frostTint.\(s)") ?? d.object(forKey: "pulse.frostTint.\(s)")) as? Double ?? frostTint
+        frostBehind = (d.object(forKey: "sino.frostBehind.\(s)") ?? d.object(forKey: "pulse.frostBehind.\(s)")) as? Bool ?? frostBehind
+        if let c = (d.object(forKey: "sino.colors.\(s)") ?? d.object(forKey: "pulse.colors.\(s)")) as? [String: [Double]] { colors = c }
     }
 
     func save() {
         let d = UserDefaults.standard
-        d.set(interval, forKey: "pulse.interval")
-        d.set(Array(bar), forKey: "pulse.bar")
-        d.set(barOrder, forKey: "pulse.barOrder")
-        d.set(Array(drop), forKey: "pulse.drop")
-        d.set(login, forKey: "pulse.login")
-        d.set(colors, forKey: "pulse.colors")
-        d.set(frost, forKey: "pulse.frost")
-        d.set(frostTint, forKey: "pulse.frostTint")
-        d.set(frostBehind, forKey: "pulse.frostBehind")
-        d.set(customApp, forKey: "pulse.customApp")
+        d.set(interval, forKey: "sino.interval")
+        d.set(Array(bar), forKey: "sino.bar")
+        d.set(barOrder, forKey: "sino.barOrder")
+        d.set(Array(drop), forKey: "sino.drop")
+        d.set(login, forKey: "sino.login")
+        d.set(colors, forKey: "sino.colors")
+        d.set(frost, forKey: "sino.frost")
+        d.set(frostTint, forKey: "sino.frostTint")
+        d.set(frostBehind, forKey: "sino.frostBehind")
+        d.set(customApp, forKey: "sino.customApp")
         writeSlot()
     }
 
@@ -314,8 +314,8 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
     }
 
     private func ping(_ latest: String) {
-        let key = "pulse.update.notifiedTag"
-        if UserDefaults.standard.string(forKey: key) == latest { return }
+        let key = "sino.update.notifiedTag"
+        if (UserDefaults.standard.string(forKey: key) ?? UserDefaults.standard.string(forKey: "pulse.update.notifiedTag")) == latest { return }
         UserDefaults.standard.set(latest, forKey: key)
         let c = UNMutableNotificationContent()
         c.title = "Sino"
@@ -587,10 +587,6 @@ struct SettingsRoot: View {
                 Divider().padding(.leading, 14)
                 row("GitHub") {
                     Button("@Aduersarius") { openURL("https://github.com/Aduersarius") }
-                }
-                Divider().padding(.leading, 14)
-                row("Web") {
-                    Button("pariflow.com") { openURL("https://pariflow.com") }
                 }
             }
         }

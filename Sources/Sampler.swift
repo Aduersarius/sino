@@ -140,7 +140,7 @@ final class Sampler: ObservableObject {
         host_page_size(mach_host_self(), &ps)
         pageSize = UInt64(ps)
         memSize = sysctlU64("hw.memsize") ?? 1
-        _ = pulse_smc_init()
+        _ = sino_smc_init()
         tick()
         timer = Timer.scheduledTimer(withTimeInterval: Prefs.shared.interval, repeats: true) { [weak self] _ in
             self?.tick()
@@ -168,7 +168,7 @@ final class Sampler: ObservableObject {
         if let powerSrc {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSrc, .commonModes)
         }
-        pulse_smc_shutdown()
+        sino_smc_shutdown()
     }
 
     private func powerChanged() {
@@ -466,7 +466,7 @@ final class Sampler: ObservableObject {
         s.netTopName = netTopName
         s.netTopIcon = netTopIcon
         s.netTopBps = netTopBps
-        if let store = SCDynamicStoreCreate(nil, "pulse" as CFString, nil, nil),
+        if let store = SCDynamicStoreCreate(nil, "sino" as CFString, nil, nil),
            let info = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
            let r = info["Router"] as? String {
             s.netRouter = r
@@ -565,7 +565,7 @@ final class Sampler: ObservableObject {
     private func sampleFans(_ s: inout Snapshot) {
         var rpm = [Float](repeating: 0, count: 8)
         var mx = [Float](repeating: 0, count: 8)
-        let n = Int(pulse_smc_fans(&rpm, &mx, 8))
+        let n = Int(sino_smc_fans(&rpm, &mx, 8))
         var fans: [FanSample] = (0..<n).map { i in
             FanSample(id: i, name: "Fan #\(i + 1)", rpm: Double(rpm[i]), maxRPM: Double(mx[i]))
         }
@@ -575,7 +575,7 @@ final class Sampler: ObservableObject {
         var cels = [Float](repeating: 0, count: 16)
         let tn = nameBuf.withUnsafeMutableBufferPointer { nb in
             cels.withUnsafeMutableBufferPointer { cb in
-                pulse_smc_temps(nb.baseAddress, cb.baseAddress, 16)
+                sino_smc_temps(nb.baseAddress, cb.baseAddress, 16)
             }
         }
         var temps: [TempSample] = []
@@ -641,9 +641,9 @@ final class Sampler: ObservableObject {
             next[pid] = total
             let rss = ti.pti_resident_size
             var foot: UInt64 = 0
-            if pulse_pid_footprint(Int32(pid), &foot) != 0 || foot == 0 { foot = rss }
+            if sino_pid_footprint(Int32(pid), &foot) != 0 || foot == 0 { foot = rss }
             var nj: UInt64 = 0
-            let hasE = pulse_pid_energy_nj(Int32(pid), &nj) == 0
+            let hasE = sino_pid_energy_nj(Int32(pid), &nj) == 0
             if hasE { nextEnergy[pid] = nj }
             let wantCPU = dt > 0.2 && prevProc[pid] != nil
             let wantMem = foot > 16 * 1024 * 1024
@@ -780,7 +780,7 @@ private func currentSSID(bsd: String) -> String? {
     let wifi = CWWiFiClient.shared().interface()
     if let s = wifi?.ssid(), !s.isEmpty { return s }
     let name = wifi?.interfaceName ?? bsd
-    if let store = SCDynamicStoreCreate(nil, "pulse-ssid" as CFString, nil, nil),
+    if let store = SCDynamicStoreCreate(nil, "sino-ssid" as CFString, nil, nil),
        let d = SCDynamicStoreCopyValue(store, "State:/Network/Interface/\(name)/AirPort" as CFString) as? [String: Any] {
         if let s = d["SSID_STR"] as? String, !s.isEmpty { return s }
         if let data = d["SSID"] as? Data,

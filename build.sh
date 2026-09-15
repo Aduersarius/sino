@@ -12,7 +12,7 @@ swiftc -parse-as-library -O -module-name Sino \
   -import-objc-header "$ROOT/Sources/Bridging.h" \
   -framework SwiftUI -framework AppKit -framework IOKit -framework Combine -framework ServiceManagement -framework SystemConfiguration -framework CoreWLAN -framework CoreLocation -framework UserNotifications \
   -o "$BIN" \
-  "$ROOT/Sources/SMC.c" "$ROOT/Sources/Sampler.swift" "$ROOT/Sources/PulseApp.swift" "$ROOT/Sources/Settings.swift"
+  "$ROOT/Sources/SMC.c" "$ROOT/Sources/Sampler.swift" "$ROOT/Sources/SinoApp.swift" "$ROOT/Sources/Settings.swift"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Assets/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 echo -n 'APPL????' > "$APP/Contents/PkgInfo"
