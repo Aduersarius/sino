@@ -1,66 +1,164 @@
-#!/usr/bin/env swift
 import AppKit
 import Foundation
 
-let root = URL(fileURLWithPath: #file).deletingLastPathComponent()
-let outDir = root
+let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+let srcUrl = root.appendingPathComponent("Assets/gen/q3-area.png")
+let outDir = root.appendingPathComponent("Assets")
+let iconsetDir = outDir.appendingPathComponent("AppIcon.iconset")
 
-func squircle(in rect: CGRect, n: CGFloat = 5) -> NSBezierPath {
-    let path = NSBezierPath()
-    let steps = 360
-    let cx = rect.midX, cy = rect.midY
-    let rx = rect.width / 2, ry = rect.height / 2
-    for i in 0...steps {
-        let t = CGFloat(i) / CGFloat(steps) * 2 * .pi
-        let c = cos(t), s = sin(t)
-        let x = cx + rx * copysign(pow(abs(c), 2 / n), c)
-        let y = cy + ry * copysign(pow(abs(s), 2 / n), s)
-        let p = NSPoint(x: x, y: y)
-        if i == 0 { path.move(to: p) } else { path.line(to: p) }
-    }
-    path.close()
-    return path
+guard let srcImg = NSImage(contentsOf: srcUrl),
+      let srcRep = srcImg.representations.first as? NSBitmapImageRep else {
+    fputs("Error: Could not load source image from \(srcUrl.path)\n", stderr)
+    exit(1)
 }
 
-func drawMark(size: CGFloat, simple: Bool) {
-    let s = size
-    let mid: CGFloat = 0.50
-    let nx = s * 0.26
-    let ny = s * mid
-    let nr = s * (simple ? 0.12 : 0.085)
-    let lw = simple ? max(2, s * 0.09) : s * 0.048
-
-    NSColor.white.set()
-
-    if !simple {
-        let ro = nr * 1.72
-        let ri = nr * 1.28
-        let ring = NSBezierPath()
-        ring.appendOval(in: NSRect(x: nx - ro, y: ny - ro, width: ro * 2, height: ro * 2))
-        ring.appendOval(in: NSRect(x: nx - ri, y: ny - ri, width: ri * 2, height: ri * 2))
-        ring.windingRule = .evenOdd
-        ring.fill()
-    }
-    NSBezierPath(ovalIn: NSRect(x: nx - nr, y: ny - nr, width: nr * 2, height: nr * 2)).fill()
-
-    let x0 = nx + (simple ? nr : nr * 1.72) - lw * 0.2
-    let x1 = s * 0.88
-    let amp = s * 0.17
-    let n = simple ? 24 : 100
-    let wave = NSBezierPath()
-    for i in 0...n {
-        let t = CGFloat(i) / CGFloat(n)
-        let p = NSPoint(x: x0 + (x1 - x0) * t, y: ny - amp * sin(2 * .pi * t))
-        if i == 0 { wave.move(to: p) } else { wave.line(to: p) }
-    }
-    wave.lineJoinStyle = .round
-    wave.lineCapStyle = .round
-    wave.lineWidth = lw
-    wave.stroke()
+let W = srcRep.pixelsWide
+let H = srcRep.pixelsHigh
+guard let srcData = srcRep.bitmapData else {
+    fputs("Error: Could not access source bitmap data\n", stderr)
+    exit(1)
 }
+
+let bpr = srcRep.bytesPerRow
+let spp = srcRep.samplesPerPixel
+
+// Fast flood fill to find white background pixels
+var isBg = [Bool](repeating: false, count: W * H)
+var queue = [Int]()
+queue.reserveCapacity(W * H / 3)
+
+func isWhitePixel(_ x: Int, _ y: Int) -> Bool {
+    let offset = y * bpr + x * (srcRep.bitsPerPixel / 8)
+    let r = srcData[offset]
+    let g = srcData[offset + 1]
+    let b = srcData[offset + 2]
+    return r > 245 && g > 245 && b > 245
+}
+
+func tryAdd(_ x: Int, _ y: Int) {
+    let idx = y * W + x
+    if !isBg[idx] && isWhitePixel(x, y) {
+        isBg[idx] = true
+        queue.append(idx)
+    }
+}
+
+// Seed corners and edges
+for x in 0..<W {
+    tryAdd(x, 0)
+    tryAdd(x, H - 1)
+}
+for y in 0..<H {
+    tryAdd(0, y)
+    tryAdd(W - 1, y)
+}
+
+var head = 0
+while head < queue.count {
+    let idx = queue[head]
+    head += 1
+    let x = idx % W
+    let y = idx / W
+    
+    if x > 0 { tryAdd(x - 1, y) }
+    if x < W - 1 { tryAdd(x + 1, y) }
+    if y > 0 { tryAdd(x, y - 1) }
+    if y < H - 1 { tryAdd(x, y + 1) }
+}
+
+print("Flood fill identified \(queue.count) canvas background pixels")
+
+// Create RGBA 2048x2048 buffer
+let outRep = NSBitmapImageRep(
+    bitmapDataPlanes: nil,
+    pixelsWide: W,
+    pixelsHigh: H,
+    bitsPerSample: 8,
+    samplesPerPixel: 4,
+    hasAlpha: true,
+    isPlanar: false,
+    colorSpaceName: .deviceRGB,
+    bytesPerRow: W * 4,
+    bitsPerPixel: 32
+)!
+
+guard let dstData = outRep.bitmapData else {
+    fputs("Error: Could not access destination bitmap data\n", stderr)
+    exit(1)
+}
+
+let rimR: UInt8 = 48
+let rimG: UInt8 = 52
+let rimB: UInt8 = 63
+let rimLum: Double = 0.20
+
+for y in 0..<H {
+    let rowStart = y * W
+    let dstRowOffset = y * (W * 4)
+    let srcRowOffset = y * bpr
+    let bpp = srcRep.bitsPerPixel / 8
+    
+    for x in 0..<W {
+        let idx = rowStart + x
+        let dstOffset = dstRowOffset + x * 4
+        
+        if isBg[idx] {
+            dstData[dstOffset] = 0
+            dstData[dstOffset + 1] = 0
+            dstData[dstOffset + 2] = 0
+            dstData[dstOffset + 3] = 0
+        } else {
+            let srcOffset = srcRowOffset + x * bpp
+            let r = srcData[srcOffset]
+            let g = srcData[srcOffset + 1]
+            let b = srcData[srcOffset + 2]
+            
+            // Check boundary
+            var nearBg = false
+            for dy in -2...2 {
+                let ny = y + dy
+                if ny >= 0 && ny < H {
+                    for dx in -2...2 {
+                        let nx = x + dx
+                        if nx >= 0 && nx < W {
+                            if isBg[ny * W + nx] {
+                                nearBg = true
+                                break
+                            }
+                        }
+                    }
+                }
+                if nearBg { break }
+            }
+            
+            if nearBg {
+                let lum = (0.299 * Double(r) + 0.587 * Double(g) + 0.114 * Double(b)) / 255.0
+                let alpha = max(0.0, min(1.0, (1.0 - lum) / (1.0 - rimLum)))
+                if alpha <= 0.05 {
+                    dstData[dstOffset] = 0
+                    dstData[dstOffset + 1] = 0
+                    dstData[dstOffset + 2] = 0
+                    dstData[dstOffset + 3] = 0
+                } else {
+                    dstData[dstOffset] = rimR
+                    dstData[dstOffset + 1] = rimG
+                    dstData[dstOffset + 2] = rimB
+                    dstData[dstOffset + 3] = UInt8(round(alpha * 255.0))
+                }
+            } else {
+                dstData[dstOffset] = r
+                dstData[dstOffset + 1] = g
+                dstData[dstOffset + 2] = b
+                dstData[dstOffset + 3] = 255
+            }
+        }
+    }
+}
+
+let highResImg = NSImage(size: NSSize(width: W, height: H))
+highResImg.addRepresentation(outRep)
 
 func render(size: Int) -> NSBitmapImageRep {
-    let s = CGFloat(size)
     let rep = NSBitmapImageRep(
         bitmapDataPlanes: nil,
         pixelsWide: size,
@@ -73,42 +171,37 @@ func render(size: Int) -> NSBitmapImageRep {
         bytesPerRow: 0,
         bitsPerPixel: 0
     )!
+    
     NSGraphicsContext.saveGraphicsState()
     let ctx = NSGraphicsContext(bitmapImageRep: rep)!
     ctx.shouldAntialias = true
     ctx.imageInterpolation = .high
     NSGraphicsContext.current = ctx
-    let flip = NSAffineTransform()
-    flip.translateX(by: 0, yBy: s)
-    flip.scaleX(by: 1, yBy: -1)
-    flip.concat()
-
+    
     NSColor.clear.setFill()
-    NSRect(x: 0, y: 0, width: s, height: s).fill()
-
-    let inset = s * 0.04
-    let plate = squircle(in: NSRect(x: inset, y: inset, width: s - 2 * inset, height: s - 2 * inset))
-    let grad = NSGradient(colors: [
-        NSColor(calibratedRed: 28 / 255, green: 38 / 255, blue: 56 / 255, alpha: 1),
-        NSColor(calibratedRed: 8 / 255, green: 10 / 255, blue: 16 / 255, alpha: 1),
-    ])!
-    grad.draw(in: plate, angle: -90)
-
-    drawMark(size: s, simple: size <= 32)
-
+    NSRect(x: 0, y: 0, width: size, height: size).fill()
+    highResImg.draw(in: NSRect(x: 0, y: 0, width: size, height: size),
+                    from: .zero,
+                    operation: .copy,
+                    fraction: 1.0)
+    
     NSGraphicsContext.restoreGraphicsState()
     return rep
 }
 
 func writePNG(_ rep: NSBitmapImageRep, to url: URL) {
-    try! FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try! rep.representation(using: .png, properties: [:])!.write(to: url)
+    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let data = rep.representation(using: .png, properties: [:])!
+    try! data.write(to: url)
 }
 
-let iconset = outDir.appendingPathComponent("AppIcon.iconset")
-try? FileManager.default.removeItem(at: iconset)
-try! FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
+// Generate AppIcon-1024.png
+let rep1024 = render(size: 1024)
+let icon1024Url = outDir.appendingPathComponent("AppIcon-1024.png")
+writePNG(rep1024, to: icon1024Url)
+print("Saved \(icon1024Url.path)")
 
+// Generate iconset
 let pairs: [(Int, String)] = [
     (16, "icon_16x16.png"),
     (32, "icon_16x16@2x.png"),
@@ -121,10 +214,27 @@ let pairs: [(Int, String)] = [
     (512, "icon_512x512.png"),
     (1024, "icon_512x512@2x.png"),
 ]
-var cache: [Int: NSBitmapImageRep] = [:]
+
+var cache: [Int: NSBitmapImageRep] = [1024: rep1024]
 for (sz, name) in pairs {
-    if cache[sz] == nil { cache[sz] = render(size: sz) }
-    writePNG(cache[sz]!, to: iconset.appendingPathComponent(name))
+    if cache[sz] == nil {
+        cache[sz] = render(size: sz)
+    }
+    writePNG(cache[sz]!, to: iconsetDir.appendingPathComponent(name))
 }
-writePNG(cache[1024]!, to: outDir.appendingPathComponent("AppIcon-1024.png"))
-fputs("wrote \(iconset.path)\n", stderr)
+print("Generated all icons in \(iconsetDir.path)")
+
+// Run iconutil
+let icnsUrl = outDir.appendingPathComponent("AppIcon.icns")
+let proc = Process()
+proc.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
+proc.arguments = ["-c", "icns", iconsetDir.path, "-o", icnsUrl.path]
+try! proc.run()
+proc.waitUntilExit()
+
+if proc.terminationStatus == 0 {
+    print("Successfully built \(icnsUrl.path)")
+} else {
+    fputs("Error running iconutil (status \(proc.terminationStatus))\n", stderr)
+    exit(1)
+}
