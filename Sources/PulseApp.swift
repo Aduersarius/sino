@@ -54,6 +54,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             self.applyStroke()
         }
         Updater.shared.start()
+        if let img = NSImage(named: "AppIcon") { NSApp.applicationIconImage = img }
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Sino", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())

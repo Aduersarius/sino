@@ -16,6 +16,7 @@ swiftc -parse-as-library -O -module-name Sino \
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Assets/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 echo -n 'APPL????' > "$APP/Contents/PkgInfo"
+find "$APP" -exec xattr -c {} + 2>/dev/null || true
 codesign -s - --force --deep "$APP" >/dev/null
 ROOTAPP="/Applications/Sino.app"
 rm -rf "$ROOT/Pulse.app" "$ROOT/dist/Pulse.app" "$ROOT/Sino.app"
@@ -24,5 +25,6 @@ cp "$BIN" "$ROOTAPP/Contents/MacOS/Sino"
 cp "$ROOT/Info.plist" "$ROOTAPP/Contents/Info.plist"
 cp "$ROOT/Assets/AppIcon.icns" "$ROOTAPP/Contents/Resources/AppIcon.icns"
 echo -n 'APPL????' > "$ROOTAPP/Contents/PkgInfo"
+find "$ROOTAPP" -exec xattr -c {} + 2>/dev/null || true
 codesign -s - --force --deep "$ROOTAPP" >/dev/null
 echo "built $APP and installed to $ROOTAPP"

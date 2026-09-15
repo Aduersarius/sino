@@ -1,5 +1,5 @@
 <p align="center">
-  <img height="128" src="Assets/AppIcon-1024.png" alt="Sino">
+  <img height="128" src="Assets/AppIcon-1024.png?v=3" alt="Sino">
 </p>
 <h1 align="center">Sino</h1>
 <p align="center">
