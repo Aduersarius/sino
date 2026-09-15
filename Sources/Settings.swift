@@ -35,6 +35,7 @@ final class Prefs: ObservableObject {
     @Published var frostTint: Double
     @Published var frostBehind: Bool
     @Published var customApp: String
+    @Published var customApp2: String
 
     private init() {
         let d = UserDefaults.standard
@@ -61,6 +62,7 @@ final class Prefs: ObservableObject {
         frostTint = (d.object(forKey: "sino.frostTint") ?? d.object(forKey: "pulse.frostTint")) as? Double ?? 0
         frostBehind = (d.object(forKey: "sino.frostBehind") ?? d.object(forKey: "pulse.frostBehind")) as? Bool ?? true
         customApp = d.string(forKey: "sino.customApp") ?? d.string(forKey: "pulse.customApp") ?? ""
+        customApp2 = d.string(forKey: "sino.customApp2") ?? d.string(forKey: "pulse.customApp2") ?? ""
         if bar.isEmpty { bar = ["ram", "cpu"] }
         if drop.isEmpty { drop = ["cpu"] }
         if d.object(forKey: "sino.frost.light") == nil && d.object(forKey: "pulse.frost.light") == nil { writeSlot(false) }
@@ -105,6 +107,7 @@ final class Prefs: ObservableObject {
         d.set(frostTint, forKey: "sino.frostTint")
         d.set(frostBehind, forKey: "sino.frostBehind")
         d.set(customApp, forKey: "sino.customApp")
+        d.set(customApp2, forKey: "sino.customApp2")
         writeSlot()
     }
 
@@ -205,15 +208,33 @@ final class Prefs: ObservableObject {
         App.shared.applyStroke()
     }
 
-    var customAppName: String {
-        URL(fileURLWithPath: customApp).deletingPathExtension().lastPathComponent
+    func customAppName(slot: Int = 1) -> String {
+        let path = slot == 2 ? customApp2 : customApp
+        return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
     }
 
-    var customAppIcon: NSImage? {
-        customApp.isEmpty ? nil : NSWorkspace.shared.icon(forFile: customApp)
+    func customAppIcon(slot: Int = 1) -> NSImage? {
+        let path = slot == 2 ? customApp2 : customApp
+        guard !path.isEmpty else { return nil }
+        let raw = NSWorkspace.shared.icon(forFile: path)
+        if let best = raw.representations.max(by: { $0.pixelsWide < $1.pixelsWide }), best.pixelsWide >= 64 {
+            let img = NSImage(size: NSSize(width: 32, height: 32))
+            img.addRepresentation(best)
+            return img
+        }
+        return raw
     }
 
-    func pickCustomApp() {
+    var customAppName: String { customAppName(slot: 1) }
+    var customAppIcon: NSImage? { customAppIcon(slot: 1) }
+
+    func pickCustomApp(slot: Int = 1) {
+        let wasAccessory = NSApp.activationPolicy() == .accessory
+        if wasAccessory {
+            NSApp.setActivationPolicy(.regular)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+
         let p = NSOpenPanel()
         p.canChooseFiles = true
         p.canChooseDirectories = false
@@ -222,13 +243,27 @@ final class Prefs: ObservableObject {
         p.directoryURL = URL(fileURLWithPath: "/Applications")
         p.prompt = "Choose"
         p.message = "App for the dropdown toolbar"
-        guard p.runModal() == .OK, let url = p.url else { return }
-        customApp = url.path
+        let res = p.runModal()
+
+        if wasAccessory && App.shared.settingsWC == nil {
+            NSApp.setActivationPolicy(.accessory)
+        }
+
+        guard res == .OK, let url = p.url else { return }
+        if slot == 2 {
+            customApp2 = url.path
+        } else {
+            customApp = url.path
+        }
         save()
     }
 
-    func clearCustomApp() {
-        customApp = ""
+    func clearCustomApp(slot: Int = 1) {
+        if slot == 2 {
+            customApp2 = ""
+        } else {
+            customApp = ""
+        }
         save()
     }
 }
@@ -424,18 +459,30 @@ struct SettingsRoot: View {
                 }
             }
             section("Toolbar") {
-                row("Shortcut app") {
-                    HStack(spacing: 8) {
-                        if let img = prefs.customAppIcon {
-                            Image(nsImage: img).resizable().frame(width: 16, height: 16)
-                        }
-                        Text(prefs.customApp.isEmpty ? "None" : prefs.customAppName)
-                            .font(Chrome.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Button(prefs.customApp.isEmpty ? "Choose" : "Change") { prefs.pickCustomApp() }
-                    }
+                row("Shortcut app 1") {
+                    appRow(1)
                 }
+                Divider().padding(.leading, 14)
+                row("Shortcut app 2") {
+                    appRow(2)
+                }
+            }
+        }
+    }
+
+    func appRow(_ slot: Int) -> some View {
+        let path = slot == 2 ? prefs.customApp2 : prefs.customApp
+        return HStack(spacing: 8) {
+            if let img = prefs.customAppIcon(slot: slot) {
+                Image(nsImage: img).resizable().frame(width: 16, height: 16)
+            }
+            Text(path.isEmpty ? "None" : prefs.customAppName(slot: slot))
+                .font(Chrome.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Button(path.isEmpty ? "Choose" : "Change") { prefs.pickCustomApp(slot: slot) }
+            if !path.isEmpty {
+                Button("Clear") { prefs.clearCustomApp(slot: slot) }
             }
         }
     }

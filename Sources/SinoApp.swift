@@ -35,11 +35,12 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     private var barClickMon: Any?
     private var catcher: NSPanel?
     private var hoverMon: Any?
-    private var settingsWC: NSWindowController?
+    var settingsWC: NSWindowController?
     private var dropOpen = false
     private var ignoreClicksUntil = Date.distantPast
     private var lastDark = false
     private var appearObs: NSKeyValueObservation?
+    private var lastChips: [MenuChip] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyTheme()
@@ -52,6 +53,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             self.lastDark = dark
             self.prefs.loadSlot(dark)
             self.applyStroke()
+            self.lastChips = []
+            self.refreshMenu()
         }
         Updater.shared.start()
         if let img = NSImage(named: "AppIcon") { NSApp.applicationIconImage = img }
@@ -94,16 +97,20 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                self.objectWillChange.send()
+                if self.dropOpen {
+                    self.objectWillChange.send()
+                }
                 self.refreshMenu()
             }
             .store(in: &bag)
         prefs.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.objectWillChange.send()
-                self?.applyStroke()
-                self?.refreshMenu()
+                guard let self else { return }
+                self.objectWillChange.send()
+                self.applyStroke()
+                self.lastChips = []
+                self.refreshMenu()
             }
             .store(in: &bag)
         refreshMenu()
@@ -154,7 +161,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     func refreshMenu() {
         guard extra != nil, let button = item?.button else { return }
-        extra.chips = menuChips()
+        let chips = menuChips()
+        extra.chips = chips
         let h = max(button.bounds.height, 22)
         let w = extra.fittingWidth
         if abs(extra.frame.width - w) > 0.5 || abs(extra.frame.height - h) > 0.5 {
@@ -164,8 +172,11 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         if abs(item.length - len) > 0.5 {
             item.length = len
         }
-        button.effectiveAppearance.performAsCurrentDrawingAppearance {
-            button.image = extra.makeImage()
+        if chips != lastChips || button.image == nil {
+            lastChips = chips
+            button.effectiveAppearance.performAsCurrentDrawingAppearance {
+                button.image = extra.makeImage()
+            }
         }
         if dropOpen { holdHighlight() } else {
             button.isHighlighted = false
@@ -291,6 +302,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         prefs.loadSlot(lastDark)
         applyTheme()
         applyStroke()
+        lastChips = []
+        refreshMenu()
     }
 
     func cycleInterval() {
@@ -316,23 +329,14 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
-    func openBatterySettings() {
-        let urls = [
-            "x-apple.systempreferences:com.apple.settings.Battery",
-            "x-apple.systempreferences:com.apple.preference.battery"
-        ]
-        for s in urls {
-            if let u = URL(string: s), NSWorkspace.shared.open(u) { return }
-        }
-        openUtil("System Settings")
-    }
-
-    func openCustomApp() {
-        let path = prefs.customApp
+    func openCustomApp(slot: Int = 1) {
+        let path = slot == 2 ? prefs.customApp2 : prefs.customApp
         if path.isEmpty || !FileManager.default.fileExists(atPath: path) {
-            prefs.pickCustomApp()
+            hideDrop()
+            DispatchQueue.main.async { self.prefs.pickCustomApp(slot: slot) }
             return
         }
+        hideDrop()
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
@@ -380,6 +384,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             ignoreClicksUntil = Date().addingTimeInterval(0.35)
             dropOpen = true
             sampler.runHeavy()
+            objectWillChange.send()
             refreshMenu()
             sizePopover()
             drop.orderFrontRegardless()
@@ -542,7 +547,7 @@ final class CatcherView: NSView {
     override func rightMouseDown(with event: NSEvent) { onDown?() }
 }
 
-struct MenuChip {
+struct MenuChip: Equatable {
     var label: String
     var value: String
     var batteryFrac: Double? = nil
@@ -1353,11 +1358,9 @@ struct Dashboard: View {
 
     var toolbar: some View {
         HStack(spacing: 4) {
-            tool("bolt.fill", "Battery settings", selected: true) { App.shared.openBatterySettings() }
             tool("waveform.path.ecg", "Activity Monitor") { App.shared.openUtil("Activity Monitor") }
             tool("exclamationmark.triangle.fill", "Console", tint: .yellow) { App.shared.openUtil("Console") }
             tool("terminal.fill", "Terminal") { App.shared.openUtil("Terminal") }
-            customTool
             Text(intervalLabel)
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Color.primary.opacity(0.8))
@@ -1368,6 +1371,8 @@ struct Dashboard: View {
                 .help("Refresh interval — click to cycle")
                 .accessibilityAddTraits(.isButton)
             tool(themeIcon, "Theme") { App.shared.cycleTheme() }
+            customTool(1)
+            customTool(2)
             tool("gearshape.fill", "Settings") { app.openSettings() }
         }
         .padding(4)
@@ -1375,11 +1380,12 @@ struct Dashboard: View {
         .background(pal.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
-    var customTool: some View {
-        let tip = app.prefs.customApp.isEmpty ? "Set toolbar app" : app.prefs.customAppName
+    func customTool(_ slot: Int) -> some View {
+        let path = slot == 2 ? app.prefs.customApp2 : app.prefs.customApp
+        let tip = path.isEmpty ? "Set toolbar app" : app.prefs.customAppName(slot: slot)
         return Group {
-            if let img = app.prefs.customAppIcon {
-                Image(nsImage: img).resizable().interpolation(.high).frame(width: 12, height: 12)
+            if let img = app.prefs.customAppIcon(slot: slot) {
+                Image(nsImage: img).resizable().interpolation(.high).frame(width: 14, height: 14)
             } else {
                 Image(systemName: "plus.app")
                     .font(.system(size: 11, weight: .semibold))
@@ -1389,13 +1395,16 @@ struct Dashboard: View {
         .frame(maxWidth: .infinity)
         .frame(height: 20)
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(pal.track))
-        .overlay { HoverPad(tip: tip, captureHits: true, onClick: { App.shared.openCustomApp() }) }
+        .overlay { HoverPad(tip: tip, captureHits: true, onClick: { App.shared.openCustomApp(slot: slot) }) }
         .help(tip)
         .accessibilityAddTraits(.isButton)
         .contextMenu {
-            Button("Choose App…") { app.prefs.pickCustomApp() }
-            if !app.prefs.customApp.isEmpty {
-                Button("Clear", role: .destructive) { app.prefs.clearCustomApp() }
+            Button("Choose App…") {
+                App.shared.hideDrop()
+                DispatchQueue.main.async { self.app.prefs.pickCustomApp(slot: slot) }
+            }
+            if !path.isEmpty {
+                Button("Clear", role: .destructive) { app.prefs.clearCustomApp(slot: slot) }
             }
         }
     }

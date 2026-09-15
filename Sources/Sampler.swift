@@ -132,6 +132,12 @@ final class Sampler: ObservableObject {
     private var netTopAt = Date.distantPast
     private var prevNetProc: [pid_t: (UInt64, UInt64)] = [:]
     private var powerSrc: CFRunLoopSource?
+    private var lastVolumesAt = Date.distantPast
+    private var lastBattStaticAt = Date.distantPast
+    private var lastRouterAt = Date.distantPast
+    private var gpuNameCached: String?
+    private var gpuVendorCached: String?
+    private var gpuCoresCached: Int?
 
     init() {
         eCores = sysctlInt("hw.perflevel1.logicalcpu") ?? 0
@@ -303,9 +309,12 @@ final class Sampler: ObservableObject {
         while svc != 0 {
             defer { IOObjectRelease(svc); svc = IOIteratorNext(it) }
             guard let dict = copyProps(svc) else { continue }
-            if let model = dict["model"] as? String { s.gpuName = model }
-            if let n = dict["gpu-core-count"] as? NSNumber { s.gpuCores = n.intValue }
-            s.gpuVendor = pciVendor(dict)
+            if let cached = gpuNameCached { s.gpuName = cached }
+            else if let model = dict["model"] as? String { s.gpuName = model; gpuNameCached = model }
+            if let cached = gpuCoresCached { s.gpuCores = cached }
+            else if let n = dict["gpu-core-count"] as? NSNumber { s.gpuCores = n.intValue; gpuCoresCached = n.intValue }
+            if let cached = gpuVendorCached { s.gpuVendor = cached }
+            else { let v = pciVendor(dict); s.gpuVendor = v; gpuVendorCached = v }
             guard let stats = dict["PerformanceStatistics"] as? [String: Any] else { continue }
             if let u = stats["Device Utilization %"] as? NSNumber { s.gpuUsage = u.doubleValue / 100 }
             if let u = stats["Renderer Utilization %"] as? NSNumber { s.gpuRenderer = u.doubleValue / 100 }
@@ -320,36 +329,39 @@ final class Sampler: ObservableObject {
     private func sampleDisk(_ s: inout Snapshot) {
         if diskNameCached == nil { diskNameCached = nvmeModel() ?? "Apple SSD" }
         s.diskName = diskNameCached ?? "Disk"
-        let url = URL(fileURLWithPath: "/")
-        guard let v = try? url.resourceValues(forKeys: [
-            .volumeAvailableCapacityForImportantUsageKey,
-            .volumeTotalCapacityKey
-        ]), let total = v.volumeTotalCapacity, total > 0 else { return }
-        let avail = UInt64(v.volumeAvailableCapacityForImportantUsage ?? 0)
-        s.diskAvail = avail
-        s.diskTotal = UInt64(total)
-        s.diskUsedPct = 1 - Double(avail) / Double(total)
-        var vols: [VolumeSample] = []
-        if let urls = FileManager.default.mountedVolumeURLs(
-            includingResourceValuesForKeys: [.volumeNameKey, .volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey],
-            options: [.skipHiddenVolumes]
-        ) {
-            for url in urls {
-                guard let rv = try? url.resourceValues(forKeys: [
-                    .volumeNameKey, .volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey
-                ]), let tot = rv.volumeTotalCapacity, tot > 1_000_000_000 else { continue }
-                let av = UInt64(rv.volumeAvailableCapacityForImportantUsage ?? 0)
-                let name = rv.volumeName ?? url.lastPathComponent
-                vols.append(VolumeSample(
-                    id: url.path,
-                    name: name,
-                    avail: av,
-                    total: UInt64(tot),
-                    usedPct: 1 - Double(av) / Double(tot)
-                ))
-            }
+        var stat = statfs()
+        if statfs("/", &stat) == 0 {
+            let bsize = UInt64(stat.f_bsize)
+            let total = UInt64(stat.f_blocks) * bsize
+            let avail = UInt64(stat.f_bavail) * bsize
+            s.diskAvail = avail
+            s.diskTotal = total
+            s.diskUsedPct = total > 0 ? (1 - Double(avail) / Double(total)) : 0
         }
-        s.volumes = vols
+        if heavy || s.volumes.isEmpty || Date().timeIntervalSince(lastVolumesAt) >= 30 {
+            lastVolumesAt = Date()
+            var vols: [VolumeSample] = []
+            if let urls = FileManager.default.mountedVolumeURLs(
+                includingResourceValuesForKeys: [.volumeNameKey, .volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey],
+                options: [.skipHiddenVolumes]
+            ) {
+                for url in urls {
+                    guard let rv = try? url.resourceValues(forKeys: [
+                        .volumeNameKey, .volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey
+                    ]), let tot = rv.volumeTotalCapacity, tot > 1_000_000_000 else { continue }
+                    let av = UInt64(rv.volumeAvailableCapacityForImportantUsage ?? 0)
+                    let name = rv.volumeName ?? url.lastPathComponent
+                    vols.append(VolumeSample(
+                        id: url.path,
+                        name: name,
+                        avail: av,
+                        total: UInt64(tot),
+                        usedPct: 1 - Double(av) / Double(tot)
+                    ))
+                }
+            }
+            s.volumes = vols
+        }
     }
 
     private func sampleNet(_ s: inout Snapshot) {
@@ -466,12 +478,15 @@ final class Sampler: ObservableObject {
         s.netTopName = netTopName
         s.netTopIcon = netTopIcon
         s.netTopBps = netTopBps
-        if let store = SCDynamicStoreCreate(nil, "sino" as CFString, nil, nil),
-           let info = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
-           let r = info["Router"] as? String {
-            s.netRouter = r
-        } else {
-            s.netRouter = "—"
+        if heavy || s.netRouter == "—" || Date().timeIntervalSince(lastRouterAt) >= 30 {
+            lastRouterAt = Date()
+            if let store = SCDynamicStoreCreate(nil, "sino" as CFString, nil, nil),
+               let info = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
+               let r = info["Router"] as? String {
+                s.netRouter = r
+            } else {
+                s.netRouter = "—"
+            }
         }
         kickPublicIP()
     }
@@ -479,6 +494,8 @@ final class Sampler: ObservableObject {
     func runHeavy() {
         heavy = true
         var s = snap
+        sampleDisk(&s)
+        sampleBattery(&s)
         sampleProcs(&s)
         snap = s
         kickNetTop()
@@ -607,15 +624,19 @@ final class Sampler: ObservableObject {
                 break
             }
         }
-        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
-        guard svc != 0 else { return }
-        defer { IOObjectRelease(svc) }
-        guard let dict = copyProps(svc) else { return }
-        if let c = dict["CycleCount"] as? NSNumber { s.battCycles = c.intValue }
-        if let bd = dict["BatteryData"] as? [String: Any],
-           let fcc = (bd["FullChargeCapacity"] as? NSNumber)?.doubleValue,
-           let dc = (bd["DesignCapacity"] as? NSNumber)?.doubleValue, dc > 0 {
-            s.battHealth = fcc / dc
+        let now = Date()
+        if heavy || s.battHealth == 0 || now.timeIntervalSince(lastBattStaticAt) >= 60 {
+            lastBattStaticAt = now
+            let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+            guard svc != 0 else { return }
+            defer { IOObjectRelease(svc) }
+            guard let dict = copyProps(svc) else { return }
+            if let c = dict["CycleCount"] as? NSNumber { s.battCycles = c.intValue }
+            if let bd = dict["BatteryData"] as? [String: Any],
+               let fcc = (bd["FullChargeCapacity"] as? NSNumber)?.doubleValue,
+               let dc = (bd["DesignCapacity"] as? NSNumber)?.doubleValue, dc > 0 {
+                s.battHealth = fcc / dc
+            }
         }
     }
 
