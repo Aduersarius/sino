@@ -19,6 +19,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var theme: String = UserDefaults.standard.string(forKey: "theme") ?? "system"
     @Published var settingsPage = "general"
     @Published var panel: Panel?
+    @Published var cleaningRAM = false
+    @Published var cleanFeedback: String? = nil
+    @Published var fetchingIP = false
+    @Published var confirmingKillPid: pid_t? = nil
     enum Panel: Equatable { case cpu, ram, storage, net, fans, battery, gpu }
     // ponytail: screen rect of each main-column card → detail Y
     var cardFrames: [Panel: NSRect] = [:]
@@ -369,11 +373,17 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func quitPid(_ pid: pid_t) {
-        guard pid > 1, pid != getpid() else { return }
-        if let running = NSRunningApplication(processIdentifier: pid) {
-            if !running.terminate() { running.forceTerminate() }
-        } else {
-            kill(pid, SIGTERM)
+        quitPids([pid])
+    }
+
+    func quitPids(_ pids: [pid_t]) {
+        for pid in pids {
+            guard pid > 1, pid != getpid() else { continue }
+            if let running = NSRunningApplication(processIdentifier: pid) {
+                if !running.terminate() { running.forceTerminate() }
+            } else {
+                kill(pid, SIGTERM)
+            }
         }
     }
 
@@ -512,12 +522,14 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             let vc = NSHostingController(rootView: SettingsRoot(app: self, prefs: prefs))
             let w = NSWindow(contentViewController: vc)
             w.title = "Sino"
-            w.styleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
+            w.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
             w.titlebarAppearsTransparent = true
             w.titleVisibility = .hidden
             w.isReleasedWhenClosed = false
             w.acceptsMouseMovedEvents = true
-            w.setContentSize(NSSize(width: 600, height: 360))
+            w.minSize = NSSize(width: 600, height: 320)
+            w.maxSize = NSSize(width: 600, height: 1200)
+            w.setContentSize(NSSize(width: 600, height: 420))
             w.center()
             settingsWC = NSWindowController(window: w)
             NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
@@ -982,6 +994,13 @@ struct Dashboard: View {
                         Spacer()
                         Text("\(bytesGB(snap.ramUsed)) / \(bytesGB(snap.ramTotal))").font(Palette.body).foregroundStyle(.secondary)
                     }
+                    if snap.ramSwapTotal > 0 {
+                        HStack {
+                            Text("Swap").font(Palette.body)
+                            Spacer()
+                            Text("\(bytesGB(snap.ramSwapUsed)) / \(bytesGB(snap.ramSwapTotal))").font(Palette.body).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
             if shown("gpu") {
@@ -1006,6 +1025,11 @@ struct Dashboard: View {
                         Text("\(bytesGB(snap.diskAvail, giB: false)) available").font(Palette.body)
                         Spacer()
                         Text(pct0(snap.diskUsedPct)).font(Palette.body).foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Write \(rate(snap.diskWrite))").font(Palette.tiny).foregroundStyle(NetChart.upCol)
+                        Spacer()
+                        Text("Read \(rate(snap.diskRead))").font(Palette.tiny).foregroundStyle(NetChart.downCol)
                     }
                 }
             }
@@ -1052,24 +1076,43 @@ struct Dashboard: View {
                         Text("Charge").font(Palette.body)
                         Spacer()
                         Text(pct0(snap.battCharge)).font(Palette.body).foregroundStyle(.secondary)
-                        Bar(snap.battCharge, pal.green, pal.track).frame(width: 52)
+                        Bar(snap.battCharge, chargeColor(snap.battCharge), pal.track, charging: snap.charging).frame(width: 52)
                     }
                     HStack {
-                        Text("Health").font(Palette.body)
+                        Text(snap.charging ? "Until Full" : "Time Left").font(Palette.body)
                         Spacer()
-                        Text(pct0(snap.battHealth)).font(Palette.body).foregroundStyle(.secondary)
-                        Bar(snap.battHealth, pal.green.opacity(0.45), pal.track).frame(width: 52)
+                        Text(batteryTimeRemainingText).font(Palette.body).foregroundStyle(.secondary)
                     }
                     HStack {
                         Text("Battery Cycles").font(Palette.body)
                         Spacer()
                         Text("\(snap.battCycles)").font(Palette.body).foregroundStyle(.secondary)
                     }
+                    if snap.systemLoadW > 0 || snap.adapterPowerW > 0 {
+                        HStack {
+                            Text("System Load").font(Palette.body)
+                            Spacer()
+                            Text(watts(snap.systemLoadW)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
             toolbar
         }
         .frame(width: 256)
+    }
+
+    var batteryTimeRemainingText: String {
+        if snap.charging {
+            if snap.battMinutesRemaining > 0 {
+                return formatMinutes(snap.battMinutesRemaining)
+            }
+            return snap.battCharge >= 0.99 ? "Charged" : "Charging…"
+        }
+        if snap.battMinutesRemaining > 0 {
+            return formatMinutes(snap.battMinutesRemaining)
+        }
+        return "Calculating…"
     }
 
     func shown(_ id: String) -> Bool { app.prefs.drop.contains(id) }
@@ -1094,11 +1137,41 @@ struct Dashboard: View {
     var cpuSide: some View {
         Group {
             Card("CPU CORES", "cpu", pal) {
-                ForEach(snap.cores) { c in
-                    HStack {
-                        Text(c.name).font(Palette.body)
-                        Spacer()
-                        Bar(c.usage, pal.accent, pal.track).frame(width: 64)
+                let pCores = snap.cores.filter { $0.name.contains("Performance") }
+                let eCores = snap.cores.filter { $0.name.contains("Efficiency") }
+                let maxCol = max(1, min(max(pCores.count, eCores.count), 6))
+                let cols = Array(repeating: GridItem(.flexible(), spacing: 4), count: maxCol)
+
+                if !pCores.isEmpty || !eCores.isEmpty {
+                    if !pCores.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("PERFORMANCE (%)")
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            LazyVGrid(columns: cols, spacing: 6) {
+                                ForEach(pCores) { c in
+                                    CoreGaugeCell(core: c, accent: pal.accent, track: pal.track)
+                                }
+                            }
+                        }
+                    }
+                    if !eCores.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("EFFICIENCY (%)")
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            LazyVGrid(columns: cols, spacing: 6) {
+                                ForEach(eCores) { c in
+                                    CoreGaugeCell(core: c, accent: Color(red: 0.20, green: 0.78, blue: 0.45), track: pal.track)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: min(snap.cores.count, 4)), spacing: 6) {
+                        ForEach(snap.cores) { c in
+                            CoreGaugeCell(core: c, accent: pal.accent, track: pal.track)
+                        }
                     }
                 }
             }
@@ -1106,7 +1179,17 @@ struct Dashboard: View {
                 ForEach(snap.processes) { p in
                     HStack(spacing: 5) {
                         icon(p.icon)
-                        Text(p.name).font(Palette.body).lineLimit(1)
+                        HStack(spacing: 4) {
+                            Text(p.name).font(Palette.body).lineLimit(1)
+                            if p.count > 1 {
+                                Text("\(p.count)")
+                                    .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 0.5)
+                                    .background(pal.track, in: Capsule())
+                            }
+                        }
                         Spacer()
                         Text(pct1(p.cpu)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
                     }
@@ -1132,6 +1215,15 @@ struct Dashboard: View {
     var ramSide: some View {
         Group {
             Card("MEMORY", "memorychip", pal) {
+                Sparkline(values: snap.ramHistory, color: pal.accent)
+                    .frame(height: 38)
+                Bar(snap.ramPressure, pal.accent, pal.track)
+                HStack {
+                    Text("Pressure").font(Palette.tiny).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(pct0(snap.ramPressure)).font(Palette.tiny.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                Divider().padding(.vertical, 2)
                 MetricRow("Used", bytesGB(snap.ramUsed), snap.ramTotal == 0 ? 0 : Double(snap.ramUsed) / Double(snap.ramTotal), pal)
                 MetricRow("Wired", bytesGB(snap.ramWired), snap.ramTotal == 0 ? 0 : Double(snap.ramWired) / Double(snap.ramTotal), pal)
                 MetricRow("Compressed", bytesGB(snap.ramCompressed), snap.ramTotal == 0 ? 0 : Double(snap.ramCompressed) / Double(snap.ramTotal), pal)
@@ -1143,35 +1235,80 @@ struct Dashboard: View {
                 )
                 MetricRow(
                     "Swap",
-                    bytesGB(snap.ramSwapUsed),
+                    "\(bytesGB(snap.ramSwapUsed)) / \(bytesGB(snap.ramSwapTotal))",
                     snap.ramSwapTotal == 0 ? 0 : Double(snap.ramSwapUsed) / Double(snap.ramSwapTotal),
                     pal
                 )
-            }
-            Card("PRESSURE", "gauge", pal) {
-                Bar(snap.ramPressure, pal.accent, pal.track)
-                HStack {
-                    Text("Pressure").font(Palette.body)
-                    Spacer()
-                    Text(pct0(snap.ramPressure)).font(Palette.body).foregroundStyle(.secondary)
+            } headerTrailing: {
+                HStack(spacing: 5) {
+                    if let fb = app.cleanFeedback {
+                        Text(fb)
+                            .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color.green)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Color.green.opacity(0.12), in: Capsule())
+                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                    }
+                    Button {
+                        guard !app.cleaningRAM else { return }
+                        app.cleaningRAM = true
+                        app.cleanFeedback = nil
+                        app.sampler.cleanRAM { freed in
+                            app.cleaningRAM = false
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                if freed >= 1024 * 1024 * 1024 {
+                                    app.cleanFeedback = String(format: "Freed %.2f GB", Double(freed) / (1024 * 1024 * 1024))
+                                } else if freed > 0 {
+                                    app.cleanFeedback = "Freed \(freed / (1024 * 1024)) MB"
+                                } else {
+                                    app.cleanFeedback = "Optimized"
+                                }
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                                withAnimation(.easeOut(duration: 0.3)) {
+                                    app.cleanFeedback = nil
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            TimelineView(.animation(minimumInterval: 0.016, paused: !app.cleaningRAM)) { tl in
+                                let angle: Double = app.cleaningRAM ? (tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 0.8) / 0.8) * 360.0 : 0.0
+                                Image(systemName: app.cleaningRAM ? "arrow.triangle.2.circlepath" : "sparkles")
+                                    .font(.system(size: 8.5, weight: .semibold))
+                                    .rotationEffect(.degrees(angle))
+                            }
+                            Text(app.cleaningRAM ? "Cleaning..." : "Clean")
+                                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundStyle(app.cleaningRAM ? pal.accent : .secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(pal.track.opacity(0.8), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Quick RAM Clean (evacuate purgeable caches)")
                 }
             }
             Card("PROCESSES", "square.grid.2x2", pal) {
-                ForEach(snap.memProcesses) { p in
+                ForEach(snap.memProcesses.prefix(app.prefs.ramProcCount)) { p in
                     HStack(spacing: 5) {
                         icon(p.icon)
-                        Text(p.name).font(Palette.body).lineLimit(1)
+                        HStack(spacing: 4) {
+                            Text(p.name).font(Palette.body).lineLimit(1)
+                            if p.count > 1 {
+                                Text("\(p.count)")
+                                    .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 0.5)
+                                    .background(pal.track, in: Capsule())
+                            }
+                        }
                         Spacer()
                         Text(bytesGB(p.mem)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
-                        Button {
-                            App.shared.quitPid(p.id)
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Quit \(p.name)")
+                        ProcessKillButton(process: p, app: app, pal: pal)
                     }
                 }
             }
@@ -1214,18 +1351,44 @@ struct Dashboard: View {
     }
 
     var storageSide: some View {
-        Card("VOLUMES", "internaldrive", pal) {
-            ForEach(snap.volumes) { v in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(v.name).font(Palette.body)
-                    MetricRow("Used", bytesGB(v.total > v.avail ? v.total - v.avail : 0, giB: false), v.usedPct, pal)
-                    HStack {
-                        Text("\(bytesGB(v.avail, giB: false)) free").font(Palette.tiny).foregroundStyle(.secondary)
-                        Spacer()
-                        Text(bytesGB(v.total, giB: false)).font(Palette.tiny).foregroundStyle(.secondary)
+        Group {
+            Card("STORAGE ACTIVITY", "externaldrive.connected.to.line.below", pal) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(rate(snap.diskWrite)).font(.system(size: 15, weight: .semibold).monospacedDigit())
+                        Text("Write").font(Palette.tiny).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(rate(snap.diskRead)).font(.system(size: 15, weight: .semibold).monospacedDigit())
+                        Text("Read").font(Palette.tiny).foregroundStyle(.secondary)
                     }
                 }
-                .padding(.bottom, 4)
+                NetChart(up: snap.diskWriteHistory, down: snap.diskReadHistory)
+                    .frame(height: 48)
+                HStack(spacing: 4) {
+                    Circle().fill(NetChart.upCol).frame(width: 6, height: 6)
+                    Text("Peak Write").font(Palette.tiny).foregroundStyle(.secondary)
+                    Text(rate(snap.diskWritePeak)).font(Palette.tiny.monospacedDigit())
+                    Spacer()
+                    Circle().fill(NetChart.downCol).frame(width: 6, height: 6)
+                    Text("Peak Read").font(Palette.tiny).foregroundStyle(.secondary)
+                    Text(rate(snap.diskReadPeak)).font(Palette.tiny.monospacedDigit())
+                }
+            }
+            Card("VOLUMES", "internaldrive", pal) {
+                ForEach(snap.volumes) { v in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(v.name).font(Palette.body)
+                        MetricRow("Used", bytesGB(v.total > v.avail ? v.total - v.avail : 0, giB: false), v.usedPct, pal)
+                        HStack {
+                            Text("\(bytesGB(v.avail, giB: false)) free").font(Palette.tiny).foregroundStyle(.secondary)
+                            Spacer()
+                            Text(bytesGB(v.total, giB: false)).font(Palette.tiny).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.bottom, 4)
+                }
             }
         }
     }
@@ -1259,30 +1422,110 @@ struct Dashboard: View {
                     Image(systemName: snap.wifi ? "wifi" : "cable.connector").foregroundStyle(NetChart.downCol)
                     Text(snap.netSSID != "—" ? snap.netSSID : snap.netName).font(Palette.body)
                     Spacer()
+                    Text(snap.netInterface).font(Palette.tiny.monospaced()).foregroundStyle(.secondary)
+                }
+            }
+            if snap.wifi {
+                Card("WI-FI DETAILS", "wifi.badge.checkmark", pal) {
+                    if snap.netSSID != "—" {
+                        GeoInfoRow(icon: "network", title: "Network Name", value: snap.netSSID)
+                    }
+                    if snap.netBSSID != "—" {
+                        GeoInfoRow(icon: "point.3.filled.connected.trianglepath.dotted", title: "BSSID", value: snap.netBSSID)
+                    }
+                    if snap.netRSSI != 0 {
+                        let signalText = snap.netNoise != 0 ? "\(snap.netRSSI) dBm (Noise: \(snap.netNoise) dBm)" : "\(snap.netRSSI) dBm"
+                        GeoInfoRow(icon: "waveform", title: "RSSI", value: signalText)
+                    }
+                    if snap.netChannel != "—" {
+                        GeoInfoRow(icon: "antenna.radiowaves.left.and.right", title: "Channel", value: snap.netChannel)
+                    }
+                    if snap.netStandard != "—" {
+                        GeoInfoRow(icon: "dot.radiowaves.left.and.right", title: "Standard", value: snap.netStandard)
+                    }
+                    if snap.netTxRate > 0 {
+                        GeoInfoRow(icon: "arrow.up.right.circle", title: "Transmit Rate", value: "\(Int(round(snap.netTxRate))) Mbps")
+                    }
+                    GeoInfoRow(icon: "cable.connector.horizontal", title: "Interface", value: snap.netInterface)
                 }
             }
             Card("ADDRESSES", "globe", pal) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("PUBLIC IP ADDRESSES").font(Palette.tiny).foregroundStyle(NetChart.downCol)
-                    Text(snap.publicIP).font(Palette.body.monospaced())
+                // Local IPv4 pill
+                HStack(spacing: 7) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, alignment: .center)
+                    Text("Local IPv4")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                    Text(snap.netIPv4)
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("IP ADDRESSES").font(Palette.tiny).foregroundStyle(NetChart.downCol)
-                    Text(snap.netIPv4).font(Palette.body.monospaced())
-                    if snap.netIPv6 != "—" {
-                        Text(snap.netIPv6).font(Palette.tiny.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(pal.track.opacity(0.6), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                // Public IPv4
+                GeoInfoRow(icon: "globe", title: "Public IPv4", value: snap.netGeo.publicIPv4 != "—" ? snap.netGeo.publicIPv4 : snap.publicIP)
+
+                // Location
+                if snap.netGeo.location != "—" {
+                    GeoInfoRow(icon: "map", title: "Location", value: snap.netGeo.location)
+                }
+
+                // GeoCoordinates
+                if snap.netGeo.geoCoordinates != "—" {
+                    GeoInfoRow(icon: "mappin.and.ellipse", title: "GeoCoordinates", value: snap.netGeo.geoCoordinates)
+                }
+
+                // Timezone
+                if snap.netGeo.timezone != "—" {
+                    GeoInfoRow(icon: "clock", title: "Timezone", value: snap.netGeo.timezone)
+                }
+
+                // AS
+                if snap.netGeo.asName != "—" {
+                    GeoInfoRow(icon: "point.3.filled.connected.trianglepath.dotted", title: "AS", value: snap.netGeo.asName)
+                }
+
+                // ISP
+                if snap.netGeo.isp != "—" {
+                    GeoInfoRow(icon: "antenna.radiowaves.left.and.right", title: "ISP", value: snap.netGeo.isp)
+                }
+
+                // Organization
+                if snap.netGeo.organization != "—" {
+                    GeoInfoRow(icon: "building.2", title: "Organization", value: snap.netGeo.organization)
+                }
+
+                if snap.netRouter != "—" {
+                    Divider().padding(.vertical, 1)
+                    HStack {
+                        Text("Router").font(Palette.tiny).foregroundStyle(.secondary)
+                        Spacer()
+                        Text(snap.netRouter).font(Palette.tiny.monospaced()).foregroundStyle(.secondary)
                     }
                 }
-                HStack {
-                    Text("Router").font(Palette.body)
-                    Spacer()
-                    Text(snap.netRouter).font(Palette.body.monospaced()).foregroundStyle(.secondary)
+            } headerTrailing: {
+                Button {
+                    guard !app.fetchingIP else { return }
+                    app.fetchingIP = true
+                    app.sampler.refreshPublicIP {
+                        app.fetchingIP = false
+                    }
+                } label: {
+                    TimelineView(.animation(minimumInterval: 0.016, paused: !app.fetchingIP)) { tl in
+                        let angle: Double = app.fetchingIP ? (tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 0.8) / 0.8) * 360.0 : 0.0
+                        Image(systemName: app.fetchingIP ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(app.fetchingIP ? pal.accent : .secondary)
+                            .rotationEffect(.degrees(angle))
+                    }
                 }
-                HStack {
-                    Text("MAC").font(Palette.body)
-                    Spacer()
-                    Text(snap.mac).font(Palette.body.monospaced()).foregroundStyle(.secondary)
-                }
+                .buttonStyle(.plain)
+                .help("Refresh Public IP & Geolocation")
             }
             if snap.netTopName != "—" {
                 Card("TOP PROCESS", "square.grid.2x2", pal) {
@@ -1300,6 +1543,9 @@ struct Dashboard: View {
     var fansSide: some View {
         Group {
             Card("FANS", "fan", pal) {
+                Sparkline(values: snap.fanHistory, color: pal.accent)
+                    .frame(height: 38)
+                    .padding(.bottom, 2)
                 ForEach(snap.fans) { f in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
@@ -1330,7 +1576,17 @@ struct Dashboard: View {
     var batterySide: some View {
         Group {
             Card("BATTERY", "battery.100percent", pal) {
-                MetricRow("Charge", pct0(snap.battCharge), snap.battCharge, pal)
+                HStack {
+                    Text("Charge").font(Palette.body)
+                    Spacer()
+                    Text(pct0(snap.battCharge)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
+                    Bar(snap.battCharge, chargeColor(snap.battCharge), pal.track, charging: snap.charging).frame(width: 52)
+                }
+                HStack {
+                    Text(snap.charging ? "Until Full" : "Time Left").font(Palette.body)
+                    Spacer()
+                    Text(batteryTimeRemainingText).font(Palette.body).foregroundStyle(.secondary)
+                }
                 MetricRow("Health", pct0(snap.battHealth), snap.battHealth, pal)
                 HStack {
                     Text("Cycles").font(Palette.body)
@@ -1342,12 +1598,39 @@ struct Dashboard: View {
                     Spacer()
                     Text(snap.charging ? "Charging" : "On battery").font(Palette.body).foregroundStyle(.secondary)
                 }
+                if snap.systemLoadW > 0 || snap.adapterPowerW > 0 {
+                    Divider().padding(.vertical, 2)
+                    HStack {
+                        Text("System Load").font(Palette.body)
+                        Spacer()
+                        Text(watts(snap.systemLoadW)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    PowerSankeyView(
+                        adapterW: snap.adapterPowerW,
+                        batteryW: snap.batteryPowerW,
+                        systemW: snap.systemLoadW,
+                        charging: snap.charging,
+                        accent: pal.accent
+                    )
+                    .frame(height: 84)
+                    .padding(.top, 2)
+                }
             }
             Card("ENERGY", "bolt.fill", pal) {
                 ForEach(snap.energyProcesses) { p in
                     HStack(spacing: 5) {
                         icon(p.icon)
-                        Text(p.name).font(Palette.body).lineLimit(1)
+                        HStack(spacing: 4) {
+                            Text(p.name).font(Palette.body).lineLimit(1)
+                            if p.count > 1 {
+                                Text("\(p.count)")
+                                    .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 0.5)
+                                    .background(pal.track, in: Capsule())
+                            }
+                        }
                         Spacer()
                         Text(watts(p.energyW)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
                     }
@@ -1359,7 +1642,6 @@ struct Dashboard: View {
     var toolbar: some View {
         HStack(spacing: 4) {
             tool("waveform.path.ecg", "Activity Monitor") { App.shared.openUtil("Activity Monitor") }
-            tool("exclamationmark.triangle.fill", "Console", tint: .yellow) { App.shared.openUtil("Console") }
             tool("terminal.fill", "Terminal") { App.shared.openUtil("Terminal") }
             Text(intervalLabel)
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -1373,6 +1655,7 @@ struct Dashboard: View {
             tool(themeIcon, "Theme") { App.shared.cycleTheme() }
             customTool(1)
             customTool(2)
+            customTool(3)
             tool("gearshape.fill", "Settings") { app.openSettings() }
         }
         .padding(4)
@@ -1381,7 +1664,7 @@ struct Dashboard: View {
     }
 
     func customTool(_ slot: Int) -> some View {
-        let path = slot == 2 ? app.prefs.customApp2 : app.prefs.customApp
+        let path = slot == 3 ? app.prefs.customApp3 : (slot == 2 ? app.prefs.customApp2 : app.prefs.customApp)
         let tip = path.isEmpty ? "Set toolbar app" : app.prefs.customAppName(slot: slot)
         return Group {
             if let img = app.prefs.customAppIcon(slot: slot) {
@@ -1448,31 +1731,131 @@ struct Dashboard: View {
     }
 }
 
-struct Card<Content: View>: View {
+struct GeoInfoRow: View {
+    let icon: String
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .frame(width: 14, alignment: .center)
+                .padding(.top, 1)
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 4)
+            Text(value)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
+struct ProcessKillButton: View {
+    let process: ProcSample
+    @ObservedObject var app: App
+    let pal: Palette
+
+    var isConfirming: Bool {
+        app.confirmingKillPid == process.id
+    }
+
+    var body: some View {
+        Button {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                if isConfirming {
+                    app.confirmingKillPid = nil
+                    app.quitPids(process.pids.isEmpty ? [process.id] : process.pids)
+                } else {
+                    app.confirmingKillPid = process.id
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                if isConfirming {
+                    Text("Kill")
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                } else {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, isConfirming ? 7 : 0)
+            .padding(.vertical, isConfirming ? 2.5 : 0)
+            .background(
+                isConfirming ? Color.red : Color.clear,
+                in: Capsule()
+            )
+        }
+        .buttonStyle(.plain)
+        .help(isConfirming ? "Click again to terminate \(process.name)" : "Kill \(process.name)")
+    }
+}
+
+struct Card<Content: View, HeaderTrailing: View>: View {
     let title: String
     let symbol: String
     let pal: Palette
     var panel: App.Panel?
     var active: Bool
+    let headerTrailing: HeaderTrailing?
     let content: Content
 
-    init(_ title: String, _ symbol: String, _ pal: Palette, panel: App.Panel? = nil, active: Bool = false, @ViewBuilder content: () -> Content) {
+    init(
+        _ title: String,
+        _ symbol: String,
+        _ pal: Palette,
+        panel: App.Panel? = nil,
+        active: Bool = false,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder headerTrailing: () -> HeaderTrailing
+    ) {
         self.title = title
         self.symbol = symbol
         self.pal = pal
         self.panel = panel
         self.active = active
         self.content = content()
+        self.headerTrailing = headerTrailing()
+    }
+
+    init(
+        _ title: String,
+        _ symbol: String,
+        _ pal: Palette,
+        panel: App.Panel? = nil,
+        active: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) where HeaderTrailing == EmptyView {
+        self.title = title
+        self.symbol = symbol
+        self.pal = pal
+        self.panel = panel
+        self.active = active
+        self.content = content()
+        self.headerTrailing = nil
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label(title, systemImage: symbol)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .labelStyle(.titleAndIcon)
-                .textCase(.uppercase)
-                .tracking(0.3)
+            HStack {
+                Label(title, systemImage: symbol)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .labelStyle(.titleAndIcon)
+                    .textCase(.uppercase)
+                    .tracking(0.3)
+                if let headerTrailing {
+                    Spacer()
+                    headerTrailing
+                }
+            }
             content
         }
         .padding(.horizontal, 8)
@@ -1480,6 +1863,47 @@ struct Card<Content: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(active ? pal.cardHover : pal.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay { if let panel { ScreenFrame(id: panel) } }
+    }
+}
+
+struct CoreGaugeCell: View {
+    let core: CoreSample
+    let accent: Color
+    let track: Color
+
+    var shortName: String {
+        if core.name.hasPrefix("Performance Core #") {
+            return "P" + core.name.replacingOccurrences(of: "Performance Core #", with: "")
+        } else if core.name.hasPrefix("Efficiency Core #") {
+            return "E" + core.name.replacingOccurrences(of: "Efficiency Core #", with: "")
+        } else if core.name.hasPrefix("Core #") {
+            return core.name.replacingOccurrences(of: "Core #", with: "")
+        }
+        return "\(core.id + 1)"
+    }
+
+    var body: some View {
+        VStack(spacing: 2.5) {
+            ZStack {
+                Circle()
+                    .stroke(track, lineWidth: 2.8)
+                Circle()
+                    .trim(from: 0, to: CGFloat(min(1, max(0.001, core.usage))))
+                    .stroke(accent, style: StrokeStyle(lineWidth: 2.8, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+
+                Text(String(format: "%.0f", core.usage * 100))
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+            .frame(width: 32, height: 32)
+
+            Text(shortName)
+                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .help("\(core.name): \(Int(round(core.usage * 100)))%")
     }
 }
 
@@ -1505,18 +1929,59 @@ struct Bar: View {
     let frac: Double
     let fill: Color
     let track: Color
-    init(_ frac: Double, _ fill: Color, _ track: Color) {
-        self.frac = frac; self.fill = fill; self.track = track
+    var charging: Bool = false
+    init(_ frac: Double, _ fill: Color, _ track: Color, charging: Bool = false) {
+        self.frac = frac; self.fill = fill; self.track = track; self.charging = charging
     }
     var body: some View {
-        GeometryReader { g in
-            ZStack(alignment: .leading) {
-                Capsule().fill(track)
-                Capsule().fill(fill)
-                    .frame(width: max(0, g.size.width * CGFloat(min(1, max(0, frac)))))
+        TimelineView(.animation(minimumInterval: 0.016, paused: !charging)) { tl in
+            let t = tl.date.timeIntervalSinceReferenceDate
+            let cycle = 2.4
+            // primary shimmer: 2.4s calm sweep
+            let phase1 = CGFloat(t.truncatingRemainder(dividingBy: cycle) / cycle)
+            // secondary shimmer: offset by half period
+            let phase2 = CGFloat((t + cycle * 0.5).truncatingRemainder(dividingBy: cycle) / cycle)
+            let center1 = -0.30 + phase1 * 1.60
+            let center2 = -0.30 + phase2 * 1.60
+            // glow pulse: calm 2.4s breathe
+            let glow = charging ? CGFloat(0.5 + 0.5 * sin(t * .pi * 2.0 / cycle)) : 0
+            GeometryReader { g in
+                let filled = max(0, g.size.width * CGFloat(min(1, max(0, frac))))
+                ZStack(alignment: .leading) {
+                    Capsule().fill(track)
+                    // glow backing when charging
+                    if charging && filled > 0 {
+                        Capsule()
+                            .fill(fill.opacity(0.25 * glow))
+                            .frame(width: filled)
+                            .blur(radius: 3)
+                    }
+                    Capsule().fill(fill).frame(width: filled)
+                    // primary & secondary seamless shimmer
+                    if charging && filled > 0 {
+                        let hw1: CGFloat = 0.22
+                        Capsule()
+                            .fill(LinearGradient(stops: [
+                                .init(color: .clear, location: center1 - hw1),
+                                .init(color: Color.white.opacity(0.55), location: center1),
+                                .init(color: .clear, location: center1 + hw1),
+                            ], startPoint: .leading, endPoint: .trailing))
+                            .frame(width: filled)
+                            .blendMode(.plusLighter)
+                        let hw2: CGFloat = 0.25
+                        Capsule()
+                            .fill(LinearGradient(stops: [
+                                .init(color: .clear, location: center2 - hw2),
+                                .init(color: Color.white.opacity(0.25), location: center2),
+                                .init(color: .clear, location: center2 + hw2),
+                            ], startPoint: .leading, endPoint: .trailing))
+                            .frame(width: filled)
+                            .blendMode(.plusLighter)
+                    }
+                }
             }
+            .frame(height: 4)
         }
-        .frame(height: 4)
     }
 }
 
@@ -1803,6 +2268,29 @@ private let gbFormatter: NumberFormatter = {
     return f
 }()
 
+private func chargeColor(_ v: Double) -> Color {
+    let clamped = min(1.0, max(0.0, v))
+    if clamped < 0.20 {
+        return Color(red: 0.95, green: 0.24, blue: 0.24)
+    } else if clamped < 0.50 {
+        let t = (clamped - 0.20) / 0.30
+        return Color(red: 0.95, green: 0.24 + 0.56 * t, blue: 0.20)
+    } else {
+        let t = (clamped - 0.50) / 0.50
+        return Color(red: 0.95 * (1.0 - t) + 0.22 * t, green: 0.80 + (0.78 - 0.80) * t, blue: 0.20 * (1.0 - t) + 0.40 * t)
+    }
+}
+
+private func formatMinutes(_ m: Int) -> String {
+    if m <= 0 { return "Calculating…" }
+    let h = m / 60
+    let mins = m % 60
+    if h > 0 {
+        return String(format: "%dh %02dm", h, mins)
+    }
+    return String(format: "%dm", mins)
+}
+
 private func pct0(_ v: Double) -> String {
     (pctFormatter.string(from: NSNumber(value: (v * 100).rounded())) ?? "0") + " %"
 }
@@ -1829,6 +2317,292 @@ private func shortRate(_ bps: Double) -> String {
     if bps < 1024 * 1024 { return String(format: "%.0fK", bps / 1024) }
     return String(format: "%.1fM", bps / (1024 * 1024))
 }
+// MARK: - Power Sankey
+
+struct PowerSankeyView: View {
+    let adapterW: Double
+    let batteryW: Double  // positive = charging, negative = discharging
+    let systemW: Double
+    let charging: Bool
+    let accent: Color
+
+    // Apple-grade palette colors
+    private static let blueStart   = Color(red: 0.12, green: 0.52, blue: 0.98) // Apple system blue
+    private static let blueEnd     = Color(red: 0.28, green: 0.68, blue: 1.00)
+    private static let greenStart  = Color(red: 0.16, green: 0.78, blue: 0.42) // Apple emerald
+    private static let greenEnd    = Color(red: 0.28, green: 0.92, blue: 0.56) // Bright electric emerald
+    private static let orangeStart = Color(red: 1.00, green: 0.56, blue: 0.00) // Apple orange
+    private static let orangeEnd   = Color(red: 1.00, green: 0.72, blue: 0.18)
+
+    var body: some View {
+        let (srcTitle, srcSymbol, srcWatts, sysWatts, chgWatts) = computeData()
+
+        HStack(spacing: 8) {
+            // Left column: Source (Adapter / Battery)
+            VStack(alignment: .trailing, spacing: 2) {
+                HStack(spacing: 3) {
+                    Text(srcTitle)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Image(systemName: srcSymbol)
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(charging ? Self.greenStart : Self.orangeStart)
+                }
+                Text(srcWatts)
+                    .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+            .frame(width: 58, height: 68, alignment: .trailing)
+
+            // Flow Ribbons with smooth curves & luminous animation
+            TimelineView(.animation(minimumInterval: 0.016, paused: !charging)) { tl in
+                let t = tl.date.timeIntervalSinceReferenceDate
+                ribbonsCanvas(time: t)
+            }
+
+            // Right column: Sinks (System, and optional Charging)
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "cpu")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(Self.blueStart)
+                        Text("System")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(sysWatts)
+                        .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.primary)
+                }
+
+                if charging && batteryW > 0 {
+                    Spacer(minLength: 6)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundStyle(Self.greenStart)
+                            Text("Charging")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(chgWatts)
+                            .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.primary)
+                    }
+                }
+            }
+            .frame(width: 62, height: 68, alignment: .leading)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private func computeData() -> (String, String, String, String, String) {
+        let srcW = charging ? (adapterW > 0 ? adapterW : systemW) : (systemW > 0 ? systemW : abs(batteryW))
+        let srcTitle = charging ? "Adapter" : "Battery"
+        let srcSymbol = charging ? "powerplug.fill" : "battery.100"
+        let chgW = (charging && batteryW > 0) ? batteryW : 0.0
+        return (srcTitle, srcSymbol, watts(srcW), watts(max(systemW, 0.5)), watts(chgW))
+    }
+
+    // ponytail: 2-sink partition (system + charging) with dual-phase additive shimmer & specular edge glint
+    private func ribbonsCanvas(time: Double) -> some View {
+        Canvas { ctx, size in
+            let W = size.width, H = size.height
+            let pillW: CGFloat = 4.5
+            let srcX: CGFloat = 2
+            let dstX: CGFloat = max(2, W - pillW - 2)
+
+            let sourceW = charging ? (adapterW > 0 ? adapterW : systemW) : (systemW > 0 ? systemW : abs(batteryW))
+            let sysW = max(systemW, 0.5)
+            let chargeW = (charging && batteryW > 0) ? batteryW : 0.0
+            let totalSink = sysW + chargeW
+            let total = max(sourceW, totalSink, 0.5)
+
+            let maxRibbonH: CGFloat = min(H * 0.76, 56)
+
+            let srcH = max(6, CGFloat(sourceW / total) * maxRibbonH)
+            let sysH = max(5, CGFloat(sysW / total) * maxRibbonH)
+            let chgH = chargeW > 0 ? max(5, CGFloat(chargeW / total) * maxRibbonH) : 0
+
+            let srcMidY = H / 2
+            let srcTop  = srcMidY - srcH / 2
+            let srcBot  = srcMidY + srcH / 2
+
+            // Right side distribution with smooth gap
+            let gap: CGFloat = chgH > 0 ? 6.0 : 0
+            let totalRightH = sysH + chgH + gap
+            let rightTop = H / 2 - totalRightH / 2
+            let sysTop = rightTop
+            let sysBot = sysTop + sysH
+            let chgTop = chgH > 0 ? sysBot + gap : sysBot
+            let chgBot = chgTop + chgH
+
+            // Source split: proportional to sinks to avoid overflow or gap
+            let sysRatio = totalSink > 0 ? CGFloat(sysW / totalSink) : 1.0
+            let sysSliceH = chgH > 0 ? min(srcH - 3, max(3, srcH * sysRatio)) : srcH
+
+            let x0 = srcX + pillW
+            let x1 = dstX
+            let midX = (x0 + x1) * 0.5
+
+            // Helper for monotonic horizontal-tangent S-curve
+            func addSCurve(to path: inout Path, from p0: CGPoint, to p1: CGPoint) {
+                path.addCurve(to: p1,
+                              control1: CGPoint(x: midX, y: p0.y),
+                              control2: CGPoint(x: midX, y: p1.y))
+            }
+
+            // Smooth cubic ribbon generator
+            func makeRibbon(srcY0: CGFloat, srcY1: CGFloat, dstY0: CGFloat, dstY1: CGFloat) -> Path {
+                var p = Path()
+                p.move(to: CGPoint(x: x0, y: srcY0))
+                p.addCurve(to: CGPoint(x: x1, y: dstY0),
+                           control1: CGPoint(x: midX, y: srcY0),
+                           control2: CGPoint(x: midX, y: dstY0))
+                p.addLine(to: CGPoint(x: x1, y: dstY1))
+                p.addCurve(to: CGPoint(x: x0, y: srcY1),
+                           control1: CGPoint(x: midX, y: dstY1),
+                           control2: CGPoint(x: midX, y: srcY1))
+                p.closeSubpath()
+                return p
+            }
+
+            // 1. System Ribbon
+            let sysPath = makeRibbon(srcY0: srcTop, srcY1: srcTop + sysSliceH, dstY0: sysTop, dstY1: sysBot)
+            let sysSourceCol = charging ? Self.greenStart : Self.orangeStart
+            let sysGrad = Gradient(colors: [
+                sysSourceCol.opacity(0.30),
+                Self.blueEnd.opacity(0.42)
+            ])
+            ctx.fill(sysPath, with: .linearGradient(sysGrad, startPoint: CGPoint(x: x0, y: srcMidY), endPoint: CGPoint(x: x1, y: (sysTop + sysBot)/2)))
+
+            // Top specular highlight on System ribbon
+            var sysTopLine = Path()
+            sysTopLine.move(to: CGPoint(x: x0, y: srcTop))
+            addSCurve(to: &sysTopLine, from: CGPoint(x: x0, y: srcTop), to: CGPoint(x: x1, y: sysTop))
+            let sysTopGrad = Gradient(colors: [sysSourceCol.opacity(0.60), Self.blueEnd.opacity(0.70)])
+            ctx.stroke(sysTopLine, with: .linearGradient(sysTopGrad, startPoint: CGPoint(x: x0, y: srcTop), endPoint: CGPoint(x: x1, y: sysTop)), style: StrokeStyle(lineWidth: 1.0))
+
+            // Bottom edge line on System ribbon
+            var sysBotLine = Path()
+            sysBotLine.move(to: CGPoint(x: x0, y: srcTop + sysSliceH))
+            addSCurve(to: &sysBotLine, from: CGPoint(x: x0, y: srcTop + sysSliceH), to: CGPoint(x: x1, y: sysBot))
+            ctx.stroke(sysBotLine, with: .color(Self.blueEnd.opacity(0.25)), style: StrokeStyle(lineWidth: 0.6))
+
+            // 2. Charging Ribbon & Luminous Shimmer
+            if chgH > 0 {
+                let chgPath = makeRibbon(srcY0: srcTop + sysSliceH, srcY1: srcBot, dstY0: chgTop, dstY1: chgBot)
+                let chgGrad = Gradient(colors: [
+                    Self.greenStart.opacity(0.36),
+                    Self.greenEnd.opacity(0.50)
+                ])
+                ctx.fill(chgPath, with: .linearGradient(chgGrad, startPoint: CGPoint(x: x0, y: srcMidY), endPoint: CGPoint(x: x1, y: (chgTop + chgBot)/2)))
+
+                // Top specular highlight on Charging ribbon
+                var chgTopLine = Path()
+                chgTopLine.move(to: CGPoint(x: x0, y: srcTop + sysSliceH))
+                addSCurve(to: &chgTopLine, from: CGPoint(x: x0, y: srcTop + sysSliceH), to: CGPoint(x: x1, y: chgTop))
+                let chgTopGrad = Gradient(colors: [Self.greenStart.opacity(0.65), Self.greenEnd.opacity(0.80)])
+                ctx.stroke(chgTopLine, with: .linearGradient(chgTopGrad, startPoint: CGPoint(x: x0, y: srcTop + sysSliceH), endPoint: CGPoint(x: x1, y: chgTop)), style: StrokeStyle(lineWidth: 1.0))
+
+                // Bottom highlight sheen on Charging ribbon
+                var chgBotLine = Path()
+                chgBotLine.move(to: CGPoint(x: x0, y: srcBot))
+                addSCurve(to: &chgBotLine, from: CGPoint(x: x0, y: srcBot), to: CGPoint(x: x1, y: chgBot))
+                ctx.stroke(chgBotLine, with: .color(Self.greenEnd.opacity(0.35)), style: StrokeStyle(lineWidth: 0.7))
+
+                // Luminous shimmering pulse wave sweeping along charging ribbon
+                if charging {
+                    let cycle = 2.4
+                    let p1 = CGFloat(time.truncatingRemainder(dividingBy: cycle) / cycle)
+                    let p2 = CGFloat((time + cycle * 0.5).truncatingRemainder(dividingBy: cycle) / cycle)
+                    let flowStart = CGPoint(x: x0, y: (srcTop + sysSliceH + srcBot) * 0.5)
+                    let flowEnd   = CGPoint(x: x1, y: (chgTop + chgBot) * 0.5)
+
+                    // Primary luminous wave
+                    let c1 = -0.30 + p1 * 1.60
+                    let hw1: CGFloat = 0.22
+                    let waveGrad1 = Gradient(stops: [
+                        .init(color: .clear, location: c1 - hw1),
+                        .init(color: Color(red: 0.40, green: 1.0, blue: 0.65).opacity(0.35), location: c1 - hw1 * 0.5),
+                        .init(color: Color.white.opacity(0.85), location: c1),
+                        .init(color: Color(red: 0.40, green: 1.0, blue: 0.65).opacity(0.35), location: c1 + hw1 * 0.5),
+                        .init(color: .clear, location: c1 + hw1)
+                    ])
+
+                    // Secondary trailing softer wave
+                    let c2 = -0.30 + p2 * 1.60
+                    let hw2: CGFloat = 0.30
+                    let waveGrad2 = Gradient(stops: [
+                        .init(color: .clear, location: c2 - hw2),
+                        .init(color: Self.greenEnd.opacity(0.30), location: c2 - hw2 * 0.5),
+                        .init(color: Color.white.opacity(0.40), location: c2),
+                        .init(color: Self.greenEnd.opacity(0.30), location: c2 + hw2 * 0.5),
+                        .init(color: .clear, location: c2 + hw2)
+                    ])
+
+                    // Specular highlight glint along the top curve
+                    let glintGrad = Gradient(stops: [
+                        .init(color: .clear, location: c1 - hw1 * 0.7),
+                        .init(color: Color.white.opacity(0.95), location: c1),
+                        .init(color: .clear, location: c1 + hw1 * 0.7)
+                    ])
+
+                    ctx.drawLayer { shimmer in
+                        shimmer.blendMode = .plusLighter
+                        shimmer.fill(chgPath, with: .linearGradient(waveGrad1, startPoint: flowStart, endPoint: flowEnd))
+                        shimmer.fill(chgPath, with: .linearGradient(waveGrad2, startPoint: flowStart, endPoint: flowEnd))
+                        shimmer.stroke(chgTopLine, with: .linearGradient(glintGrad, startPoint: CGPoint(x: x0, y: srcTop + sysSliceH), endPoint: CGPoint(x: x1, y: chgTop)), style: StrokeStyle(lineWidth: 1.4))
+                    }
+                }
+            }
+
+            // 3. Apple-style rounded pill nodes with specular sheen & ambient glow
+            let srcPill = CGRect(x: srcX, y: srcTop, width: pillW, height: srcH)
+            let sysPill = CGRect(x: dstX, y: sysTop, width: pillW, height: sysH)
+            let srcCol = charging ? Self.greenStart : Self.orangeStart
+
+            // Ambient glow behind active nodes
+            if charging {
+                ctx.drawLayer { g in
+                    g.blendMode = .plusLighter
+                    g.addFilter(.blur(radius: 3.0))
+                    g.fill(Path(roundedRect: srcPill, cornerRadius: pillW / 2), with: .color(srcCol.opacity(0.40)))
+                    if chgH > 0 {
+                        let chgPill = CGRect(x: dstX, y: chgTop, width: pillW, height: chgH)
+                        let breathe = CGFloat(0.35 + 0.15 * sin(time * .pi * 2.0 / 1.8))
+                        g.fill(Path(roundedRect: chgPill, cornerRadius: pillW / 2), with: .color(Self.greenEnd.opacity(breathe)))
+                    }
+                }
+            }
+
+            // Node fills: vertical linear gradients
+            ctx.fill(
+                Path(roundedRect: srcPill, cornerRadius: pillW / 2),
+                with: .linearGradient(Gradient(colors: [srcCol, srcCol.opacity(0.80)]), startPoint: CGPoint(x: 0, y: srcTop), endPoint: CGPoint(x: 0, y: srcBot))
+            )
+            ctx.stroke(Path(roundedRect: srcPill, cornerRadius: pillW / 2), with: .color(Color.white.opacity(0.30)), style: StrokeStyle(lineWidth: 0.5))
+
+            ctx.fill(
+                Path(roundedRect: sysPill, cornerRadius: pillW / 2),
+                with: .linearGradient(Gradient(colors: [Self.blueEnd, Self.blueStart]), startPoint: CGPoint(x: 0, y: sysTop), endPoint: CGPoint(x: 0, y: sysBot))
+            )
+            ctx.stroke(Path(roundedRect: sysPill, cornerRadius: pillW / 2), with: .color(Color.white.opacity(0.30)), style: StrokeStyle(lineWidth: 0.5))
+
+            if chgH > 0 {
+                let chgPill = CGRect(x: dstX, y: chgTop, width: pillW, height: chgH)
+                ctx.fill(
+                    Path(roundedRect: chgPill, cornerRadius: pillW / 2),
+                    with: .linearGradient(Gradient(colors: [Self.greenEnd, Self.greenStart]), startPoint: CGPoint(x: 0, y: chgTop), endPoint: CGPoint(x: 0, y: chgBot))
+                )
+                ctx.stroke(Path(roundedRect: chgPill, cornerRadius: pillW / 2), with: .color(Color.white.opacity(0.35)), style: StrokeStyle(lineWidth: 0.5))
+            }
+        }
+    }
+}
+
 private func watts(_ w: Double) -> String {
     if w < 1 { return String(format: "%.0f mW", w * 1000) }
     return String(format: "%.2f W", w)

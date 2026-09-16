@@ -36,10 +36,13 @@ final class Prefs: ObservableObject {
     @Published var frostBehind: Bool
     @Published var customApp: String
     @Published var customApp2: String
+    @Published var customApp3: String
+    @Published var ramProcCount: Int
 
     private init() {
         let d = UserDefaults.standard
         interval = (d.object(forKey: "sino.interval") ?? d.object(forKey: "pulse.interval")) as? Double ?? 1
+        ramProcCount = (d.object(forKey: "sino.ramProcCount") ?? d.object(forKey: "pulse.ramProcCount")) as? Int ?? 10
         bar = Set(d.stringArray(forKey: "sino.bar") ?? d.stringArray(forKey: "pulse.bar") ?? ["ram", "cpu"])
         let ids = Prefs.modules.map(\.id)
         var order = d.stringArray(forKey: "sino.barOrder") ?? d.stringArray(forKey: "pulse.barOrder") ?? []
@@ -63,6 +66,7 @@ final class Prefs: ObservableObject {
         frostBehind = (d.object(forKey: "sino.frostBehind") ?? d.object(forKey: "pulse.frostBehind")) as? Bool ?? true
         customApp = d.string(forKey: "sino.customApp") ?? d.string(forKey: "pulse.customApp") ?? ""
         customApp2 = d.string(forKey: "sino.customApp2") ?? d.string(forKey: "pulse.customApp2") ?? ""
+        customApp3 = d.string(forKey: "sino.customApp3") ?? d.string(forKey: "pulse.customApp3") ?? ""
         if bar.isEmpty { bar = ["ram", "cpu"] }
         if drop.isEmpty { drop = ["cpu"] }
         if d.object(forKey: "sino.frost.light") == nil && d.object(forKey: "pulse.frost.light") == nil { writeSlot(false) }
@@ -108,6 +112,8 @@ final class Prefs: ObservableObject {
         d.set(frostBehind, forKey: "sino.frostBehind")
         d.set(customApp, forKey: "sino.customApp")
         d.set(customApp2, forKey: "sino.customApp2")
+        d.set(customApp3, forKey: "sino.customApp3")
+        d.set(ramProcCount, forKey: "sino.ramProcCount")
         writeSlot()
     }
 
@@ -188,6 +194,11 @@ final class Prefs: ObservableObject {
         App.shared.sampler.setInterval(interval)
     }
 
+    func setRamProcCount(_ v: Int) {
+        ramProcCount = max(3, min(30, v))
+        save()
+    }
+
     func setLogin(_ on: Bool) {
         login = on
         save()
@@ -209,12 +220,12 @@ final class Prefs: ObservableObject {
     }
 
     func customAppName(slot: Int = 1) -> String {
-        let path = slot == 2 ? customApp2 : customApp
+        let path = slot == 3 ? customApp3 : (slot == 2 ? customApp2 : customApp)
         return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
     }
 
     func customAppIcon(slot: Int = 1) -> NSImage? {
-        let path = slot == 2 ? customApp2 : customApp
+        let path = slot == 3 ? customApp3 : (slot == 2 ? customApp2 : customApp)
         guard !path.isEmpty else { return nil }
         let raw = NSWorkspace.shared.icon(forFile: path)
         if let best = raw.representations.max(by: { $0.pixelsWide < $1.pixelsWide }), best.pixelsWide >= 64 {
@@ -250,7 +261,9 @@ final class Prefs: ObservableObject {
         }
 
         guard res == .OK, let url = p.url else { return }
-        if slot == 2 {
+        if slot == 3 {
+            customApp3 = url.path
+        } else if slot == 2 {
             customApp2 = url.path
         } else {
             customApp = url.path
@@ -259,7 +272,9 @@ final class Prefs: ObservableObject {
     }
 
     func clearCustomApp(slot: Int = 1) {
-        if slot == 2 {
+        if slot == 3 {
+            customApp3 = ""
+        } else if slot == 2 {
             customApp2 = ""
         } else {
             customApp = ""
@@ -406,7 +421,7 @@ struct SettingsRoot: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .ignoresSafeArea(.container, edges: .top)
-        .frame(width: 600, height: 360)
+        .frame(minWidth: 600, maxWidth: 600, minHeight: 320, maxHeight: .infinity)
         .background(Chrome.window(dark))
         .preferredColorScheme(app.currentScheme)
     }
@@ -446,6 +461,28 @@ struct SettingsRoot: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
+                Divider().padding(.leading, 14)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("RAM processes count").font(Chrome.text)
+                        Spacer()
+                        Text("\(prefs.ramProcCount)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Chrome.badge(dark), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    }
+                    Slider(
+                        value: Binding(get: { Double(prefs.ramProcCount) }, set: { prefs.setRamProcCount(Int($0)) }),
+                        in: 3...20,
+                        step: 1
+                    )
+                    Text("Number of memory-heavy processes to list in the RAM panel.")
+                        .font(Chrome.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
             }
             section("System") {
                 row("Launch at Login") {
@@ -465,6 +502,10 @@ struct SettingsRoot: View {
                 Divider().padding(.leading, 14)
                 row("Shortcut app 2") {
                     appRow(2)
+                }
+                Divider().padding(.leading, 14)
+                row("Shortcut app 3") {
+                    appRow(3)
                 }
             }
         }

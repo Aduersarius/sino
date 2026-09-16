@@ -40,6 +40,18 @@ struct ProcSample: Identifiable {
     var cpu: Double = 0
     var mem: UInt64 = 0
     var energyW: Double = 0
+    var count: Int = 1
+    var pids: [pid_t] = []
+}
+
+struct NetworkGeo: Equatable {
+    var publicIPv4: String = "—"
+    var location: String = "—"
+    var geoCoordinates: String = "—"
+    var timezone: String = "—"
+    var asName: String = "—"
+    var isp: String = "—"
+    var organization: String = "—"
 }
 
 struct Snapshot {
@@ -48,6 +60,7 @@ struct Snapshot {
     var cpuHistory: [Double] = []
     var cores: [CoreSample] = []
     var ramPressure = 0.0
+    var ramHistory: [Double] = []
     var ramWired: UInt64 = 0
     var ramCompressed: UInt64 = 0
     var ramUsed: UInt64 = 0
@@ -67,10 +80,23 @@ struct Snapshot {
     var diskAvail: UInt64 = 0
     var diskTotal: UInt64 = 0
     var diskUsedPct = 0.0
+    var diskRead = 0.0
+    var diskWrite = 0.0
+    var diskReadHistory: [Double] = []
+    var diskWriteHistory: [Double] = []
+    var diskReadPeak = 0.0
+    var diskWritePeak = 0.0
     var volumes: [VolumeSample] = []
     var netName = "Wi-Fi"
     var mac = "—"
     var wifi = true
+    var netInterface = "en0"
+    var netBSSID = "—"
+    var netRSSI = 0
+    var netNoise = 0
+    var netTxRate = 0.0
+    var netChannel = "—"
+    var netStandard = "—"
     var netIn = 0.0
     var netOut = 0.0
     var netIPv4 = "—"
@@ -82,15 +108,21 @@ struct Snapshot {
     var netInPeak = 0.0
     var netOutPeak = 0.0
     var publicIP = "—"
+    var netGeo = NetworkGeo()
     var netTopName = "—"
     var netTopIcon: NSImage?
     var netTopBps = 0.0
     var fans: [FanSample] = []
+    var fanHistory: [Double] = []
     var temps: [TempSample] = []
     var battCharge = 0.0
     var battHealth = 0.0
     var battCycles = 0
+    var battMinutesRemaining = -1
     var charging = false
+    var systemLoadW = 0.0
+    var adapterPowerW = 0.0
+    var batteryPowerW = 0.0
     var processes: [ProcSample] = []
     var memProcesses: [ProcSample] = []
     var energyProcesses: [ProcSample] = []
@@ -109,6 +141,14 @@ final class Sampler: ObservableObject {
     private let pageSize: UInt64
     private let memSize: UInt64
     private var diskNameCached: String?
+    private var prevDiskBytes: (UInt64, UInt64)?
+    private var prevDiskAt = Date.distantPast
+    private var ramHistory: [Double] = Array(repeating: 0, count: 48)
+    private var fanHistory: [Double] = Array(repeating: 0, count: 48)
+    private var diskReadHist: [Double] = Array(repeating: 0, count: 48)
+    private var diskWriteHist: [Double] = Array(repeating: 0, count: 48)
+    private var diskReadPeak = 0.0
+    private var diskWritePeak = 0.0
     private var prevNetIn: UInt64 = 0
     private var prevNetOut: UInt64 = 0
     private var prevNetAt = Date()
@@ -123,6 +163,7 @@ final class Sampler: ObservableObject {
     private var netInPeak = 0.0
     private var netOutPeak = 0.0
     private var publicIP = "—"
+    private var netGeo = NetworkGeo()
     private var publicIPAt = Date.distantPast
     private var publicIPBusy = false
     private var netTopName = "—"
@@ -217,7 +258,7 @@ final class Sampler: ObservableObject {
             Disk \(s.diskName) used \(Int(s.diskUsedPct*100))% avail \(s.diskAvail/1_000_000_000)GB
             Net \(s.netName) \(s.mac) ↓\(Int(s.netIn)) ↑\(Int(s.netOut)) B/s pub \(s.publicIP) local \(s.netIPv4) ssid \(s.netSSID) peak↓\(Int(s.netInPeak)) peak↑\(Int(s.netOutPeak)) top \(s.netTopName) \(Int(s.netTopBps)) B/s hist \(s.netInHistory.count)
             Fans \(s.fans.map { "\($0.name)=\(Int($0.rpm))" })
-            Batt \(Int(s.battCharge*100))% health \(Int(s.battHealth*100))% cycles \(s.battCycles) charging \(s.charging)
+            Batt \(Int(s.battCharge*100))% health \(Int(s.battHealth*100))% cycles \(s.battCycles) timeRem \(s.battMinutesRemaining)m charging \(s.charging)
             Procs:
             \(s.processes.map { "  \($0.name) \(Int($0.cpu*1000)/10)%" }.joined(separator: "\n"))
             """)
@@ -277,6 +318,64 @@ final class Sampler: ObservableObject {
         prevTicks = load
     }
 
+    private var cleaningRAM = false
+
+    func cleanRAM(completion: ((Int64) -> Void)? = nil) {
+        guard !cleaningRAM else { return }
+        cleaningRAM = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let hostPort = mach_host_self()
+            var pageSize: vm_size_t = 0
+            host_page_size(hostPort, &pageSize)
+
+            func getFreeBytes() -> (free: UInt64, inactive: UInt64, purgeable: UInt64) {
+                var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+                var vmStat = vm_statistics64()
+                let ret = withUnsafeMutablePointer(to: &vmStat) {
+                    $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                        host_statistics64(hostPort, HOST_VM_INFO64, $0, &count)
+                    }
+                }
+                guard ret == KERN_SUCCESS else { return (0, 0, 0) }
+                let f = UInt64(vmStat.free_count) * UInt64(pageSize)
+                let inact = UInt64(vmStat.inactive_count) * UInt64(pageSize)
+                let purge = UInt64(vmStat.purgeable_count) * UInt64(pageSize)
+                return (f, inact, purge)
+            }
+
+            let b = getFreeBytes()
+            let reclaimable = b.free + b.inactive + b.purgeable
+            let target = min(3 * 1024 * 1024 * 1024, max(512 * 1024 * 1024, reclaimable / 2))
+
+            var ptr: vm_address_t = 0
+            let ret = vm_allocate(mach_task_self_, &ptr, vm_size_t(target), VM_FLAGS_ANYWHERE)
+            if ret == KERN_SUCCESS {
+                let step = 4096
+                let bound = Int(target)
+                let raw = UnsafeMutablePointer<UInt8>(bitPattern: ptr)!
+                var offset = 0
+                while offset < bound {
+                    raw[offset] = 1
+                    offset += step
+                }
+                usleep(80000)
+                vm_deallocate(mach_task_self_, ptr, vm_size_t(target))
+            }
+
+            let a = getFreeBytes()
+            let freed = max(0, Int64(a.free) - Int64(b.free))
+
+            DispatchQueue.main.async {
+                self.cleaningRAM = false
+                var s = self.snap
+                self.sampleRAM(&s)
+                self.snap = s
+                completion?(freed)
+            }
+        }
+    }
+
     private func sampleRAM(_ s: inout Snapshot) {
         var vm = vm_statistics64()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.stride / MemoryLayout<integer_t>.stride)
@@ -292,6 +391,10 @@ final class Sampler: ObservableObject {
         s.ramWired = UInt64(vm.wire_count) * pageSize
         s.ramCompressed = UInt64(vm.compressor_page_count) * pageSize
         s.ramPressure = min(1, Double(used) / Double(memSize))
+        let usedFrac = min(1.0, Double(used) / Double(memSize))
+        ramHistory.removeFirst()
+        ramHistory.append(usedFrac)
+        s.ramHistory = ramHistory
         var xsw = xsw_usage()
         var xsz = MemoryLayout<xsw_usage>.size
         var mib: [Int32] = [CTL_VM, VM_SWAPUSAGE]
@@ -338,6 +441,48 @@ final class Sampler: ObservableObject {
             s.diskTotal = total
             s.diskUsedPct = total > 0 ? (1 - Double(avail) / Double(total)) : 0
         }
+
+        // Sample Disk I/O (Read / Write bytes)
+        let now = Date()
+        var diskIterator: io_iterator_t = 0
+        if IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOBlockStorageDriver"), &diskIterator) == KERN_SUCCESS {
+            var curRead: UInt64 = 0
+            var curWrite: UInt64 = 0
+            var svc = IOIteratorNext(diskIterator)
+            while svc != 0 {
+                var props: Unmanaged<CFMutableDictionary>?
+                if IORegistryEntryCreateCFProperties(svc, &props, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+                   let dict = props?.takeRetainedValue() as? [String: Any],
+                   let stats = dict["Statistics"] as? [String: Any] {
+                    if let rb = stats["Bytes (Read)"] as? NSNumber { curRead += rb.uint64Value }
+                    if let wb = stats["Bytes (Write)"] as? NSNumber { curWrite += wb.uint64Value }
+                }
+                IOObjectRelease(svc)
+                svc = IOIteratorNext(diskIterator)
+            }
+            IOObjectRelease(diskIterator)
+
+            if let prev = prevDiskBytes {
+                let dt = max(0.2, now.timeIntervalSince(prevDiskAt))
+                let dr = curRead >= prev.0 ? Double(curRead - prev.0) / dt : 0
+                let dw = curWrite >= prev.1 ? Double(curWrite - prev.1) / dt : 0
+                s.diskRead = dr
+                s.diskWrite = dw
+                diskReadHist.removeFirst()
+                diskReadHist.append(dr)
+                diskWriteHist.removeFirst()
+                diskWriteHist.append(dw)
+                diskReadPeak = max(diskReadPeak * 0.99, dr)
+                diskWritePeak = max(diskWritePeak * 0.99, dw)
+            }
+            prevDiskBytes = (curRead, curWrite)
+            prevDiskAt = now
+        }
+        s.diskReadHistory = diskReadHist
+        s.diskWriteHistory = diskWriteHist
+        s.diskReadPeak = diskReadPeak
+        s.diskWritePeak = diskWritePeak
+
         if heavy || s.volumes.isEmpty || Date().timeIntervalSince(lastVolumesAt) >= 30 {
             lastVolumesAt = Date()
             var vols: [VolumeSample] = []
@@ -447,9 +592,70 @@ final class Sampler: ObservableObject {
         } else {
             s.mac = iface.mac.isEmpty ? "—" : iface.mac
         }
+        s.netInterface = iface.name
         s.wifi = iface.wifi || iface.name == "en0"
         s.netSSID = s.wifi ? (currentSSID(bsd: iface.name) ?? "—") : "—"
         s.netName = s.wifi ? (s.netSSID == "—" ? "Wi-Fi" : s.netSSID) : "Ethernet"
+        if s.wifi {
+            let client = CWWiFiClient.shared()
+            let wifi = client.interface(withName: iface.name) ?? client.interface()
+            s.netRSSI = wifi?.rssiValue() ?? 0
+            s.netNoise = wifi?.noiseMeasurement() ?? 0
+            s.netTxRate = wifi?.transmitRate() ?? 0.0
+
+            var channelNum = 0
+            if let ch = wifi?.wlanChannel() {
+                channelNum = ch.channelNumber
+                var band = ""
+                switch ch.channelBand {
+                case .band2GHz: band = "2.4 GHz"
+                case .band5GHz: band = "5 GHz"
+                case .band6GHz: band = "6 GHz"
+                default: break
+                }
+                var width = ""
+                switch ch.channelWidth {
+                case .width20MHz: width = "20 MHz"
+                case .width40MHz: width = "40 MHz"
+                case .width80MHz: width = "80 MHz"
+                case .width160MHz: width = "160 MHz"
+                default: break
+                }
+                if !band.isEmpty && !width.isEmpty {
+                    s.netChannel = "\(channelNum) (\(band), \(width))"
+                } else if !band.isEmpty {
+                    s.netChannel = "\(channelNum) (\(band))"
+                } else {
+                    s.netChannel = "\(channelNum)"
+                }
+            } else {
+                s.netChannel = "—"
+            }
+
+            if let mode = wifi?.activePHYMode() {
+                switch mode {
+                case .mode11a: s.netStandard = "802.11a"
+                case .mode11b: s.netStandard = "802.11b"
+                case .mode11g: s.netStandard = "802.11g"
+                case .mode11n: s.netStandard = "802.11n (Wi-Fi 4)"
+                case .mode11ac: s.netStandard = "802.11ac (Wi-Fi 5)"
+                case .mode11ax: s.netStandard = "802.11ax (Wi-Fi 6)"
+                case .mode11be: s.netStandard = "802.11be (Wi-Fi 7)"
+                default: s.netStandard = "—"
+                }
+            } else {
+                s.netStandard = "—"
+            }
+
+            s.netBSSID = currentBSSID(wifi: wifi, ssid: s.netSSID, channel: channelNum) ?? "—"
+        } else {
+            s.netRSSI = 0
+            s.netNoise = 0
+            s.netTxRate = 0.0
+            s.netChannel = "—"
+            s.netStandard = "—"
+            s.netBSSID = "—"
+        }
         let dt = Date().timeIntervalSince(prevNetAt)
         if prevNetName == iface.name, prevNetIn > 0, dt > 0.2 {
             s.netIn = Double(iface.inn &- prevNetIn) / dt
@@ -475,6 +681,7 @@ final class Sampler: ObservableObject {
         s.netInPeak = netInPeak
         s.netOutPeak = netOutPeak
         s.publicIP = publicIP
+        s.netGeo = netGeo
         s.netTopName = netTopName
         s.netTopIcon = netTopIcon
         s.netTopBps = netTopBps
@@ -499,10 +706,28 @@ final class Sampler: ObservableObject {
         sampleProcs(&s)
         snap = s
         kickNetTop()
+        pollFastBattery()
+    }
+
+    private var fastBattTimer: Timer?
+
+    private func pollFastBattery() {
+        fastBattTimer?.invalidate()
+        fastBattTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] t in
+            guard let self, self.heavy else {
+                t.invalidate()
+                return
+            }
+            var s = self.snap
+            self.sampleBattery(&s)
+            self.snap = s
+        }
     }
 
     func stopHeavy() {
         heavy = false
+        fastBattTimer?.invalidate()
+        fastBattTimer = nil
         netTopName = "—"
         netTopIcon = nil
         netTopBps = 0
@@ -516,18 +741,83 @@ final class Sampler: ObservableObject {
         snap = s
     }
 
-    private func kickPublicIP() {
-        if publicIPBusy || Date().timeIntervalSince(publicIPAt) < 120 { return }
-        guard let url = URL(string: "https://api.ipify.org") else { return }
+    func refreshPublicIP(completion: (() -> Void)? = nil) {
+        publicIPAt = .distantPast
+        publicIPBusy = false
+        kickPublicIP(completion: completion)
+    }
+
+    private func kickPublicIP(completion: (() -> Void)? = nil) {
+        if publicIPBusy || Date().timeIntervalSince(publicIPAt) < 120 {
+            completion?()
+            return
+        }
+        // Use secure HTTPS endpoint (ipinfo.io with fallback to https://ipwho.is)
+        guard let url = URL(string: "https://ipinfo.io/json") else {
+            completion?()
+            return
+        }
         publicIPBusy = true
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            defer { DispatchQueue.main.async { self?.publicIPBusy = false } }
-            guard let data, let ip = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-                ip.contains("."), ip.count < 48 else { return }
-            DispatchQueue.main.async {
-                self?.publicIP = ip
-                self?.publicIPAt = Date()
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 8
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            defer {
+                DispatchQueue.main.async {
+                    self?.publicIPBusy = false
+                    completion?()
+                }
+            }
+            guard let data else { return }
+            struct IPInfoResponse: Codable {
+                var ip: String?
+                var city: String?
+                var region: String?
+                var country: String?
+                var loc: String?
+                var org: String?
+                var postal: String?
+                var timezone: String?
+            }
+
+            if let resp = try? JSONDecoder().decode(IPInfoResponse.self, from: data),
+               let ip = resp.ip, !ip.isEmpty {
+                var locParts: [String] = []
+                if let c = resp.country, !c.isEmpty { locParts.append(c) }
+                if let r = resp.region, !r.isEmpty { locParts.append(r) }
+                if let ci = resp.city, !ci.isEmpty { locParts.append(ci) }
+                if let z = resp.postal, !z.isEmpty { locParts.append("ZIP: \(z)") }
+
+                var geo = NetworkGeo()
+                geo.publicIPv4 = ip
+                geo.location = locParts.isEmpty ? "—" : locParts.joined(separator: ", ")
+                if let loc = resp.loc, !loc.isEmpty {
+                    geo.geoCoordinates = loc.replacingOccurrences(of: ",", with: " , ")
+                }
+                geo.timezone = resp.timezone ?? "—"
+                
+                // Parse ASN and ISP/Org from org string (e.g. "AS197540 netcup GmbH")
+                if let rawOrg = resp.org, !rawOrg.isEmpty {
+                    let parts = rawOrg.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+                    if let first = parts.first, first.uppercased().hasPrefix("AS") {
+                        geo.asName = String(first)
+                        let remaining = parts.count > 1 ? String(parts[1]) : "—"
+                        geo.isp = remaining
+                        geo.organization = remaining
+                    } else {
+                        geo.isp = rawOrg
+                        geo.organization = rawOrg
+                    }
+                }
+
+                DispatchQueue.main.async {
+                    self?.publicIP = ip
+                    self?.netGeo = geo
+                    self?.publicIPAt = Date()
+                    var s = self?.snap ?? Snapshot()
+                    s.publicIP = ip
+                    s.netGeo = geo
+                    self?.snap = s
+                }
             }
         }.resume()
     }
@@ -588,6 +878,10 @@ final class Sampler: ObservableObject {
         }
         fans.sort { $0.rpm > $1.rpm }
         s.fans = fans
+        let maxFrac = fans.compactMap { $0.maxRPM > 0 ? min(1.0, max(0.0, $0.rpm / $0.maxRPM)) : 0.0 }.max() ?? 0.0
+        fanHistory.removeFirst()
+        fanHistory.append(maxFrac)
+        s.fanHistory = fanHistory
         var nameBuf = [CChar](repeating: 0, count: 16 * 32)
         var cels = [Float](repeating: 0, count: 16)
         let tn = nameBuf.withUnsafeMutableBufferPointer { nb in
@@ -621,21 +915,58 @@ final class Sampler: ObservableObject {
                     ?? (d[kIOPSIsChargingKey] as? Bool)
                     ?? false
                 s.charging = ac || charging
+
+                if s.charging, let mins = d[kIOPSTimeToFullChargeKey] as? NSNumber {
+                    s.battMinutesRemaining = mins.intValue
+                } else if !s.charging, let mins = d[kIOPSTimeToEmptyKey] as? NSNumber {
+                    s.battMinutesRemaining = mins.intValue
+                } else {
+                    s.battMinutesRemaining = -1
+                }
                 break
             }
         }
         let now = Date()
-        if heavy || s.battHealth == 0 || now.timeIntervalSince(lastBattStaticAt) >= 60 {
-            lastBattStaticAt = now
-            let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
-            guard svc != 0 else { return }
+        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        if svc != 0 {
             defer { IOObjectRelease(svc) }
             guard let dict = copyProps(svc) else { return }
-            if let c = dict["CycleCount"] as? NSNumber { s.battCycles = c.intValue }
-            if let bd = dict["BatteryData"] as? [String: Any],
-               let fcc = (bd["FullChargeCapacity"] as? NSNumber)?.doubleValue,
-               let dc = (bd["DesignCapacity"] as? NSNumber)?.doubleValue, dc > 0 {
-                s.battHealth = fcc / dc
+
+            if let ptd = dict["PowerTelemetryData"] as? [String: Any] {
+                if let sl = ptd["SystemLoad"] as? NSNumber {
+                    s.systemLoadW = sl.doubleValue / 1000.0
+                }
+                if let spi = ptd["SystemPowerIn"] as? NSNumber {
+                    s.adapterPowerW = spi.doubleValue / 1000.0
+                }
+                if let bp = ptd["BatteryPower"] as? NSNumber {
+                    s.batteryPowerW = bp.doubleValue / 1000.0
+                }
+            }
+
+            // Fallback for power if telemetry didn't provide it
+            if s.systemLoadW <= 0 {
+                let amp = (dict["Amperage"] as? NSNumber)?.doubleValue ?? 0
+                let volt = (dict["Voltage"] as? NSNumber)?.doubleValue ?? 0
+                let watts = abs(amp * volt) / 1_000_000.0
+                if s.charging {
+                    s.adapterPowerW = max(s.adapterPowerW, watts)
+                    s.batteryPowerW = watts
+                    s.systemLoadW = max(1.0, s.adapterPowerW - s.batteryPowerW)
+                } else {
+                    s.systemLoadW = max(s.systemLoadW, watts)
+                    s.batteryPowerW = -watts
+                }
+            }
+
+            if heavy || s.battHealth == 0 || now.timeIntervalSince(lastBattStaticAt) >= 60 {
+                lastBattStaticAt = now
+                if let c = dict["CycleCount"] as? NSNumber { s.battCycles = c.intValue }
+                if let bd = dict["BatteryData"] as? [String: Any],
+                   let fcc = (bd["FullChargeCapacity"] as? NSNumber)?.doubleValue,
+                   let dc = (bd["DesignCapacity"] as? NSNumber)?.doubleValue, dc > 0 {
+                    s.battHealth = fcc / dc
+                }
             }
         }
     }
@@ -690,28 +1021,125 @@ final class Sampler: ObservableObject {
             }
         }
         ranked.sort { $0.3 > $1.3 }
-        s.processes = ranked.prefix(10).map { ProcSample(id: $0.0, name: $0.1, icon: $0.2, cpu: $0.3) }
+        s.processes = aggregateProcs(
+            ranked.map { ProcSample(id: $0.0, name: $0.1, icon: $0.2, cpu: $0.3, count: 1, pids: [$0.0]) },
+            by: \.cpu
+        ).prefix(10).map { $0 }
+
         byMem.sort { $0.3 > $1.3 }
-        s.memProcesses = byMem.prefix(10).map { ProcSample(id: $0.0, name: $0.1, icon: $0.2, mem: $0.3) }
+        s.memProcesses = aggregateProcs(
+            byMem.map { ProcSample(id: $0.0, name: $0.1, icon: $0.2, mem: $0.3, count: 1, pids: [$0.0]) },
+            by: \.mem
+        ).prefix(30).map { $0 }
+
         byEnergy.sort { $0.3 > $1.3 }
-        s.energyProcesses = byEnergy.prefix(8).map { ProcSample(id: $0.0, name: $0.1, icon: $0.2, energyW: $0.3) }
+        s.energyProcesses = aggregateProcs(
+            byEnergy.map { ProcSample(id: $0.0, name: $0.1, icon: $0.2, energyW: $0.3, count: 1, pids: [$0.0]) },
+            by: \.energyW
+        ).prefix(5).map { $0 }
         prevProc = next
         prevEnergy = nextEnergy
         prevProcAt = now
     }
 }
 
-private func procIdentity(_ pid: pid_t) -> (String, NSImage?) {
-    if let app = NSRunningApplication(processIdentifier: pid) {
-        return (app.localizedName ?? app.bundleIdentifier ?? "pid \(pid)", app.icon)
+private func topLevelAppBundle(forPath p: String) -> (name: String, icon: NSImage?)? {
+    let url = URL(fileURLWithPath: p)
+    var matched: URL? = nil
+    var cur = url
+    while cur.pathComponents.count > 1 {
+        if cur.pathExtension == "app" {
+            matched = cur
+        }
+        cur = cur.deletingLastPathComponent()
     }
+    if let appURL = matched {
+        let bundle = Bundle(url: appURL)
+        let name = (bundle?.infoDictionary?["CFBundleDisplayName"] as? String)
+            ?? (bundle?.infoDictionary?["CFBundleName"] as? String)
+            ?? appURL.deletingPathExtension().lastPathComponent
+        let icon = NSWorkspace.shared.icon(forFile: appURL.path)
+        return (name, icon)
+    }
+    return nil
+}
+
+private func canonicalAppName(from rawName: String) -> String {
+    var clean = rawName
+    for pattern in [
+        " Helper (Renderer)",
+        " Helper (GPU)",
+        " Helper (Plugin)",
+        " Helper (Alerts)",
+        " Helper",
+        " (Renderer)",
+        " (GPU)",
+        " (Prewarmed)"
+    ] {
+        if clean.hasSuffix(pattern) {
+            clean = String(clean.dropLast(pattern.count))
+            break
+        }
+    }
+    if clean.hasPrefix("com.apple.WebKit.") || clean == "Safari Web Content" {
+        return "Safari"
+    }
+    if clean.lowercased().hasPrefix("semgrep") {
+        return "Semgrep"
+    }
+    return clean
+}
+
+private func procIdentity(_ pid: pid_t) -> (String, NSImage?) {
+    var rawPath: String? = nil
     var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
     if proc_pidpath(pid, &path, UInt32(MAXPATHLEN)) > 0 {
-        let p = String(cString: path)
-        let name = URL(fileURLWithPath: p).lastPathComponent
-        return (name, NSWorkspace.shared.icon(forFile: p))
+        rawPath = String(cString: path)
     }
+
+    if let p = rawPath {
+        if p.contains("WebKit.framework") || p.contains("Safari") {
+            return ("Safari", NSWorkspace.shared.icon(forFile: "/Applications/Safari.app"))
+        }
+        if let topApp = topLevelAppBundle(forPath: p) {
+            return topApp
+        }
+    }
+
+    if let app = NSRunningApplication(processIdentifier: pid) {
+        let name = canonicalAppName(from: app.localizedName ?? app.bundleIdentifier ?? "pid \(pid)")
+        return (name, app.icon)
+    }
+
+    if let p = rawPath {
+        let leaf = URL(fileURLWithPath: p).lastPathComponent
+        let name = canonicalAppName(from: leaf)
+        let icon = NSWorkspace.shared.icon(forFile: p)
+        return (name, icon)
+    }
+
     return ("pid \(pid)", nil)
+}
+
+private func aggregateProcs<T: Comparable>(_ procs: [ProcSample], by keyPath: KeyPath<ProcSample, T>) -> [ProcSample] {
+    var dict: [String: ProcSample] = [:]
+    var order: [String] = []
+
+    for p in procs {
+        if var existing = dict[p.name] {
+            existing.cpu += p.cpu
+            existing.mem += p.mem
+            existing.energyW += p.energyW
+            existing.count += p.count
+            existing.pids.append(contentsOf: p.pids)
+            dict[p.name] = existing
+        } else {
+            dict[p.name] = p
+            order.append(p.name)
+        }
+    }
+
+    return order.compactMap { dict[$0] }.sorted { $0[keyPath: keyPath] > $1[keyPath: keyPath] }
 }
 
 private func pciVendor(_ dict: NSDictionary) -> String {
@@ -837,6 +1265,38 @@ private func airportSSID(_ bsd: String) -> String? {
     let s = String(t.dropFirst(prefix.count))
     airportSSIDCached = s.isEmpty ? nil : s
     return airportSSIDCached
+}
+
+private func currentBSSID(wifi: CWInterface?, ssid: String, channel: Int) -> String? {
+    if let b = wifi?.bssid(), !b.isEmpty, b != "00:00:00:00:00:00", b != "02:00:00:00:00:00" {
+        return b
+    }
+    guard let wifi, let profiles = wifi.configuration()?.networkProfiles else { return nil }
+    let sel = NSSelectorFromString("bssidList")
+    var bestMatch: (Date, String)?
+    var fallbackMatch: (Date, String)?
+    for i in 0..<profiles.count {
+        guard let np = profiles.object(at: i) as? CWNetworkProfile,
+              let npSSID = np.ssid, npSSID == ssid || ssid == "—" || ssid.isEmpty,
+              np.responds(to: sel),
+              let list = np.value(forKey: "bssidList") as? [[String: Any]]
+        else { continue }
+        for e in list {
+            guard let at = e["AssociatedAt"] as? Date,
+                  let bssid = e["BSSID"] as? String, !bssid.isEmpty else { continue }
+            let ch = e["Channel"] as? Int ?? 0
+            if ch == channel && channel > 0 {
+                if bestMatch == nil || at > bestMatch!.0 {
+                    bestMatch = (at, bssid)
+                }
+            } else {
+                if fallbackMatch == nil || at > fallbackMatch!.0 {
+                    fallbackMatch = (at, bssid)
+                }
+            }
+        }
+    }
+    return (bestMatch ?? fallbackMatch)?.1
 }
 
 // CoreWLAN ssid() is nil without Location; remembered profiles still have AssociatedAt
