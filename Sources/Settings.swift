@@ -81,7 +81,7 @@ final class Prefs: ObservableObject {
         ("terminal", "Terminal", "terminal.fill"),
         ("interval", "Refresh Interval", "timer"),
         ("theme", "Theme", "sun.max.fill"),
-        ("awake", "Awake (Amphetamine)", "cup.and.saucer.fill"),
+        ("awake", "Awake", "cup.and.saucer.fill"),
         ("app1", "Shortcut App 1", "plus.app"),
         ("app2", "Shortcut App 2", "plus.app"),
         ("app3", "Shortcut App 3", "plus.app")

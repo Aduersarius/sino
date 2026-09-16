@@ -332,7 +332,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         setTheme(next)
     }
 
-    // ponytail: IOPMAssertion sleep prevention (amphetamine) -> upgrade: lid-closed clamshell mode
+    // ponytail: IOPMAssertion sleep prevention (awake) -> upgrade: lid-closed clamshell mode
     func toggleAwake(duration: TimeInterval? = nil) {
         if isAwakeActive {
             stopAwake()
