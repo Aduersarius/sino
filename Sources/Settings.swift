@@ -805,7 +805,7 @@ struct SettingsRoot: View {
                 }
                 Text("Sino")
                     .font(.system(size: 20, weight: .bold))
-                Text("made with love by Nikolay Golovin")
+                Text("Made with ❤️ by Nikolay Golovin")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
             }
