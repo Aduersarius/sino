@@ -94,6 +94,7 @@ final class Prefs: ObservableObject {
     @Published var dropOrder: [String]
     @Published var sideOrder: [String: [String]]
     @Published var sideHidden: Set<String>
+    @Published var expandedAccordionPanel: String? = "cpu"
     @Published var toolbar: Set<String>
     @Published var toolbarOrder: [String]
     @Published var login: Bool
@@ -1275,6 +1276,225 @@ struct DropOrderTable: NSViewRepresentable {
     }
 }
 
+struct SideOrderTable: NSViewRepresentable {
+    @ObservedObject var prefs: Prefs
+    var panel: String
+
+    func makeCoordinator() -> Coord { Coord(prefs: prefs, panel: panel) }
+
+    func makeNSView(context: Context) -> NSTableView {
+        let tv = NSTableView()
+        tv.headerView = nil
+        tv.backgroundColor = .clear
+        tv.selectionHighlightStyle = .none
+        tv.allowsEmptySelection = true
+        tv.allowsMultipleSelection = false
+        tv.usesAlternatingRowBackgroundColors = false
+        tv.rowHeight = 36
+        tv.intercellSpacing = .zero
+        tv.style = .plain
+        tv.delegate = context.coordinator
+        tv.dataSource = context.coordinator
+        tv.registerForDraggedTypes([.string])
+        tv.draggingDestinationFeedbackStyle = .gap
+        tv.setDraggingSourceOperationMask(.move, forLocal: true)
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("s"))
+        col.resizingMask = .autoresizingMask
+        tv.addTableColumn(col)
+        tv.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        context.coordinator.table = tv
+        return tv
+    }
+
+    func updateNSView(_ tv: NSTableView, context: Context) {
+        context.coordinator.prefs = prefs
+        context.coordinator.panel = panel
+        guard !context.coordinator.dragging else { return }
+        tv.reloadData()
+        tv.sizeLastColumnToFit()
+    }
+
+    final class Coord: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        var prefs: Prefs
+        var panel: String
+        weak var table: NSTableView?
+        var dragging = false
+        init(prefs: Prefs, panel: String) {
+            self.prefs = prefs
+            self.panel = panel
+        }
+
+        func numberOfRows(in tableView: NSTableView) -> Int {
+            prefs.sideOrder[panel]?.count ?? 0
+        }
+
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            QuietRow()
+        }
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard let items = prefs.sideOrder[panel], row < items.count else { return nil }
+            let id = items[row]
+            let item = Prefs.sideSections[panel]?.first(where: { $0.id == id })
+            let title = item?.title ?? id
+            let iconName = item?.icon ?? "square"
+            let cell = NSTableCellView()
+
+            let grip = NSImageView()
+            grip.image = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "Reorder")
+            grip.contentTintColor = .tertiaryLabelColor
+            grip.translatesAutoresizingMaskIntoConstraints = false
+
+            let icon = NSImageView()
+            icon.image = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
+            icon.contentTintColor = .secondaryLabelColor
+            icon.translatesAutoresizingMaskIntoConstraints = false
+
+            let lab = NSTextField(labelWithString: title)
+            lab.font = .systemFont(ofSize: 13)
+            lab.translatesAutoresizingMaskIntoConstraints = false
+
+            let sw = NSSwitch()
+            sw.state = prefs.isSideVisible(panel, id) ? .on : .off
+            sw.identifier = NSUserInterfaceItemIdentifier(id)
+            sw.target = self
+            sw.action = #selector(tog(_:))
+            sw.translatesAutoresizingMaskIntoConstraints = false
+
+            cell.addSubview(grip)
+            cell.addSubview(icon)
+            cell.addSubview(lab)
+            cell.addSubview(sw)
+
+            NSLayoutConstraint.activate([
+                grip.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+                grip.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                grip.widthAnchor.constraint(equalToConstant: 16),
+                grip.heightAnchor.constraint(equalToConstant: 16),
+
+                icon.leadingAnchor.constraint(equalTo: grip.trailingAnchor, constant: 10),
+                icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                icon.widthAnchor.constraint(equalToConstant: 18),
+                icon.heightAnchor.constraint(equalToConstant: 18),
+
+                lab.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+                lab.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+
+                sw.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -14),
+                sw.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                lab.trailingAnchor.constraint(lessThanOrEqualTo: sw.leadingAnchor, constant: -8)
+            ])
+            return cell
+        }
+
+        @objc func tog(_ sender: NSSwitch) {
+            let id = sender.identifier?.rawValue ?? ""
+            prefs.sideBind(panel, id).wrappedValue = sender.state == .on
+            table?.reloadData()
+        }
+
+        func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+            let item = NSPasteboardItem()
+            item.setString("\(row)", forType: .string)
+            return item
+        }
+
+        func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+            guard dropOperation == .above else { return [] }
+            tableView.setDropRow(row, dropOperation: .above)
+            return .move
+        }
+
+        func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+            guard let s = info.draggingPasteboard.string(forType: .string), let from = Int(s) else { return false }
+            guard from != row, from + 1 != row else { return true }
+            guard var order = prefs.sideOrder[panel] else { return false }
+            order.move(fromOffsets: IndexSet(integer: from), toOffset: row)
+            prefs.sideOrder[panel] = order
+            prefs.save()
+            tableView.reloadData()
+            return true
+        }
+
+        func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
+            dragging = true
+        }
+
+        func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+            dragging = false
+            tableView.reloadData()
+        }
+    }
+}
+
+struct SideSectionsConfigView: View {
+    @ObservedObject var prefs: Prefs
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ForEach(Prefs.sidePanels, id: \.id) { panel in
+                accordionItem(for: panel)
+            }
+        }
+    }
+
+    func accordionItem(for panel: (id: String, title: String, icon: String)) -> some View {
+        let isExpanded = prefs.expandedAccordionPanel == panel.id
+        let count = (prefs.sideOrder[panel.id] ?? []).count
+        let activeCount = (prefs.sideOrder[panel.id] ?? []).filter { prefs.isSideVisible(panel.id, $0) }.count
+
+        return SettingsGroup {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if isExpanded {
+                        prefs.expandedAccordionPanel = nil
+                    } else {
+                        prefs.expandedAccordionPanel = panel.id
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .frame(width: 14)
+
+                    Image(systemName: panel.icon)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 16)
+
+                    Text(panel.title)
+                        .font(Chrome.text)
+                        .foregroundStyle(Color.primary)
+
+                    Spacer()
+
+                    Text("\(activeCount)/\(count) active")
+                        .font(Chrome.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.06), in: Capsule())
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .settingsHover(radius: isExpanded ? 0 : 10)
+
+            if isExpanded {
+                Divider().padding(.leading, 14)
+                SideOrderTable(prefs: prefs, panel: panel.id)
+                    .frame(height: CGFloat(max(prefs.sideOrder[panel.id]?.count ?? 1, 1)) * 36)
+                    .id(panel.id)
+            }
+        }
+    }
+}
+
 struct ToolbarOrderTable: NSViewRepresentable {
     @ObservedObject var prefs: Prefs
 
@@ -1448,102 +1668,6 @@ struct SettingsGroup<Content: View>: View {
     var body: some View {
         VStack(spacing: 0) { content }
             .background(Chrome.group(scheme == .dark), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-}
-
-struct SideSectionsConfigView: View {
-    @ObservedObject var prefs: Prefs
-
-    static let panels: [(id: String, title: String, sections: [(id: String, title: String)])] = [
-        ("cpu", "CPU Hover Panel", [
-            ("cores", "CPU Cores"),
-            ("procs", "CPU Usage (Processes)"),
-            ("gpu", "GPU Mini Card")
-        ]),
-        ("ram", "RAM Hover Panel", [
-            ("memory", "Memory Stats & Quick Clean"),
-            ("procs", "RAM Processes")
-        ]),
-        ("gpu", "GPU Hover Panel", [
-            ("gpu", "GPU Device & Renderer Details")
-        ]),
-        ("storage", "Storage Hover Panel", [
-            ("activity", "Storage Activity Chart"),
-            ("volumes", "Volumes & Disk Usage")
-        ]),
-        ("net", "Network Hover Panel", [
-            ("chart", "Traffic Activity Chart"),
-            ("wifi", "Wi-Fi Details"),
-            ("addresses", "IP Addresses & Geolocation"),
-            ("topProc", "Top Bandwidth Process")
-        ]),
-        ("fans", "Fans Hover Panel", [
-            ("fans", "Fan Speeds & RPM"),
-            ("sensors", "Temperature Sensors")
-        ]),
-        ("battery", "Battery Hover Panel", [
-            ("battery", "Battery Stats & Health"),
-            ("energy", "Top Energy Processes")
-        ])
-    ]
-
-    var body: some View {
-        VStack(spacing: 12) {
-            ForEach(Self.panels, id: \.id) { panel in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(panel.title)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-
-                    SettingsGroup {
-                        let order = prefs.sideOrder[panel.id] ?? panel.sections.map(\.id)
-                        ForEach(Array(order.enumerated()), id: \.element) { i, secId in
-                            if i > 0 { Divider().padding(.leading, 14) }
-                            let title = panel.sections.first(where: { $0.id == secId })?.title ?? secId
-                            SettingsRow(title: title) {
-                                HStack(spacing: 8) {
-                                    if order.count > 1 {
-                                        Button {
-                                            move(panel: panel.id, from: i, up: true)
-                                        } label: {
-                                            Image(systemName: "arrow.up")
-                                                .font(.system(size: 10, weight: .semibold))
-                                        }
-                                        .buttonStyle(.plain)
-                                        .disabled(i == 0)
-                                        .opacity(i == 0 ? 0.3 : 0.8)
-
-                                        Button {
-                                            move(panel: panel.id, from: i, up: false)
-                                        } label: {
-                                            Image(systemName: "arrow.down")
-                                                .font(.system(size: 10, weight: .semibold))
-                                        }
-                                        .buttonStyle(.plain)
-                                        .disabled(i == order.count - 1)
-                                        .opacity(i == order.count - 1 ? 0.3 : 0.8)
-                                    }
-
-                                    Toggle("", isOn: prefs.sideBind(panel.id, secId))
-                                        .labelsHidden()
-                                        .toggleStyle(.switch)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func move(panel: String, from index: Int, up: Bool) {
-        var list = prefs.sideOrder[panel] ?? []
-        let to = up ? index - 1 : index + 1
-        guard list.indices.contains(index), list.indices.contains(to) else { return }
-        list.swapAt(index, to)
-        prefs.sideOrder[panel] = list
-        prefs.save()
     }
 }
 

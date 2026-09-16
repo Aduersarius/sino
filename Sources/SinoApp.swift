@@ -1070,10 +1070,13 @@ struct Dashboard: View {
         VStack(spacing: 4) {
             ForEach(app.prefs.dropOrder, id: \.self) { id in
                 if shown(id) {
-                    mainCard(for: id)
+                    if id == "toolbar" {
+                        toolbar
+                    } else {
+                        mainCard(for: id)
+                    }
                 }
             }
-            toolbar
         }
         .frame(width: 256)
     }
