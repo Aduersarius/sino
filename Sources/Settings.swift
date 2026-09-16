@@ -356,6 +356,9 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
     static let repo = "Aduersarius/sino"
     @Published var status = "—"
     @Published var updateURL: URL?
+    @Published var downloadURL: URL?
+    @Published var isUpdating = false
+    @Published var updateProgress: String? = nil
 
     var current: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
@@ -374,8 +377,12 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
     }
 
     func check(notify: Bool = false) {
+        guard !isUpdating else { return }
         status = "Checking…"
-        if !notify { updateURL = nil }
+        if !notify {
+            updateURL = nil
+            downloadURL = nil
+        }
         guard let url = URL(string: "https://api.github.com/repos/\(Updater.repo)/releases/latest") else { return }
         var req = URLRequest(url: url)
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -398,11 +405,86 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
                 }
                 let latest = tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
                 if let html = json["html_url"] as? String { self.updateURL = URL(string: html) }
+                if let assets = json["assets"] as? [[String: Any]],
+                   let zipAsset = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".zip") == true }),
+                   let dl = zipAsset["browser_download_url"] as? String {
+                    self.downloadURL = URL(string: dl)
+                }
                 if latest.compare(self.current, options: .numeric) == .orderedDescending {
                     self.status = "\(latest) available"
                     if notify { self.ping(latest) }
                 } else {
                     self.status = "Up to date"
+                }
+            }
+        }.resume()
+    }
+
+    func performUpdate() {
+        guard !isUpdating else { return }
+        guard let dl = downloadURL ?? URL(string: "https://github.com/\(Updater.repo)/releases/latest/download/Sino.app.zip") else {
+            openUpdate()
+            return
+        }
+
+        isUpdating = true
+        updateProgress = "Downloading update…"
+
+        let session = URLSession(configuration: .default)
+        session.downloadTask(with: dl) { tempURL, resp, err in
+            if let err {
+                DispatchQueue.main.async {
+                    self.isUpdating = false
+                    self.updateProgress = nil
+                    self.status = "Download failed: \(err.localizedDescription)"
+                }
+                return
+            }
+            guard let tempURL else {
+                DispatchQueue.main.async {
+                    self.isUpdating = false
+                    self.updateProgress = nil
+                    self.status = "Download failed"
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.updateProgress = "Installing update…"
+            }
+
+            let script = """
+            DEST="/Applications/Sino.app"
+            WORK=$(mktemp -d /tmp/sino_update_XXXXXX)
+            trap 'rm -rf "$WORK"' EXIT
+            cp "\(tempURL.path)" "$WORK/Sino.app.zip"
+            ditto -x -k "$WORK/Sino.app.zip" "$WORK"
+            APP=$(find "$WORK" -maxdepth 2 -name 'Sino.app' | head -1)
+            if [ -n "$APP" ]; then
+                rm -rf "$DEST"
+                cp -R "$APP" "$DEST"
+                xattr -cr "$DEST" 2>/dev/null || true
+                codesign -s - --force --deep "$DEST" >/dev/null 2>&1 || true
+                sleep 0.5
+                open -n "$DEST"
+            fi
+            """
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+                proc.arguments = ["-c", script]
+                try? proc.run()
+                proc.waitUntilExit()
+
+                DispatchQueue.main.async {
+                    if proc.terminationStatus == 0 {
+                        NSApp.terminate(nil)
+                    } else {
+                        self.isUpdating = false
+                        self.updateProgress = nil
+                        self.status = "Installation failed"
+                    }
                 }
             }
         }.resume()
@@ -414,7 +496,7 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
         UserDefaults.standard.set(latest, forKey: key)
         let c = UNMutableNotificationContent()
         c.title = "Sino"
-        c.body = "Version \(latest) is ready on GitHub"
+        c.body = "Version \(latest) is ready — update available"
         c.sound = .default
         let req = UNNotificationRequest(identifier: "sino.update.\(latest)", content: c, trigger: nil)
         UNUserNotificationCenter.current().add(req)
@@ -714,15 +796,42 @@ struct SettingsRoot: View {
 
     var aboutPage: some View {
         VStack(alignment: .leading, spacing: 16) {
+            VStack(spacing: 8) {
+                if let img = NSApp.applicationIconImage ?? NSImage(named: "AppIcon") {
+                    Image(nsImage: img)
+                        .resizable()
+                        .frame(width: 72, height: 72)
+                        .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
+                }
+                Text("Sino")
+                    .font(.system(size: 20, weight: .bold))
+                Text("made with love by Nikolay Golovin")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+
             section("Sino") {
                 row("Version") {
                     Text(updater.current).font(Chrome.caption).foregroundStyle(.secondary)
                 }
                 Divider().padding(.leading, 14)
                 row("Updates") {
-                    Button("Check") { updater.check() }
+                    HStack(spacing: 8) {
+                        if updater.isUpdating {
+                            Text(updater.updateProgress ?? "Updating…")
+                                .font(Chrome.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            if updater.downloadURL != nil {
+                                Button("Update Now") { updater.performUpdate() }
+                            }
+                            Button("Check") { updater.check() }
+                        }
+                    }
                 }
-                if updater.status != "—" {
+                if updater.status != "—" && !updater.isUpdating {
                     Text(updater.status)
                         .font(Chrome.caption)
                         .foregroundStyle(.secondary)
@@ -732,7 +841,7 @@ struct SettingsRoot: View {
                 if updater.updateURL != nil {
                     Divider().padding(.leading, 14)
                     row("Release") {
-                        Button("Open") { updater.openUpdate() }
+                        Button("View on GitHub") { updater.openUpdate() }
                     }
                 }
             }
