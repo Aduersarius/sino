@@ -21,6 +21,6 @@ else
 fi
 rm -rf "$DEST"
 cp -R "$APP" "$DEST"
-xattr -cr "$DEST" 2>/dev/null || true
+find "$DEST" -exec xattr -c {} + 2>/dev/null || true
 open "$DEST"
 echo "installed $DEST"
