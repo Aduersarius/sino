@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import IOKit.pwr_mgt
 import SwiftUI
 
 @main
@@ -23,6 +24,11 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var cleanFeedback: String? = nil
     @Published var fetchingIP = false
     @Published var confirmingKillPid: pid_t? = nil
+    @Published var isAwakeActive = false
+    @Published var preventDisplaySleep = true
+    @Published var awakeRemainingSeconds: Int? = nil // nil = indefinite
+    private var awakeAssertionID: IOPMAssertionID = 0
+    private var awakeTimer: Timer? = nil
     enum Panel: Equatable { case cpu, ram, storage, net, fans, battery, gpu }
     // ponytail: screen rect of each main-column card → detail Y
     var cardFrames: [Panel: NSRect] = [:]
@@ -71,6 +77,9 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         let mainMenu = NSMenu()
         mainMenu.addItem(appItem)
         NSApp.mainMenu = mainMenu
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.stopAwake()
+        }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let button = item.button else { return }
         button.title = ""
@@ -319,6 +328,63 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func cycleTheme() {
         let next = ["system", "light", "dark"].drop(while: { $0 != theme }).dropFirst().first ?? "system"
         setTheme(next)
+    }
+
+    // ponytail: IOPMAssertion sleep prevention (amphetamine) -> upgrade: lid-closed clamshell mode
+    func toggleAwake(duration: TimeInterval? = nil) {
+        if isAwakeActive {
+            stopAwake()
+        } else {
+            startAwake(duration: duration)
+        }
+    }
+
+    func startAwake(duration: TimeInterval? = nil) {
+        stopAwake()
+        let type = preventDisplaySleep ? kIOPMAssertionTypePreventUserIdleDisplaySleep : kIOPMAssertionTypePreventUserIdleSystemSleep
+        var id: IOPMAssertionID = 0
+        let ret = IOPMAssertionCreateWithName(
+            type as CFString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            "Sino Awake" as CFString,
+            &id
+        )
+        if ret == kIOReturnSuccess {
+            awakeAssertionID = id
+            isAwakeActive = true
+            if let duration, duration > 0 {
+                awakeRemainingSeconds = Int(duration)
+                awakeTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                    guard let self else { return }
+                    if let rem = self.awakeRemainingSeconds, rem > 1 {
+                        self.awakeRemainingSeconds = rem - 1
+                    } else {
+                        self.stopAwake()
+                    }
+                }
+            } else {
+                awakeRemainingSeconds = nil
+            }
+        }
+    }
+
+    func stopAwake() {
+        awakeTimer?.invalidate()
+        awakeTimer = nil
+        awakeRemainingSeconds = nil
+        if awakeAssertionID != 0 {
+            IOPMAssertionRelease(awakeAssertionID)
+            awakeAssertionID = 0
+        }
+        isAwakeActive = false
+    }
+
+    func setPreventDisplaySleep(_ prevent: Bool) {
+        preventDisplaySleep = prevent
+        if isAwakeActive {
+            let dur: TimeInterval? = awakeRemainingSeconds.map { TimeInterval($0) }
+            startAwake(duration: dur)
+        }
     }
 
     func openUtil(_ name: String) {
@@ -1653,6 +1719,7 @@ struct Dashboard: View {
                 .help("Refresh interval — click to cycle")
                 .accessibilityAddTraits(.isButton)
             tool(themeIcon, "Theme") { App.shared.cycleTheme() }
+            awakeTool
             customTool(1)
             customTool(2)
             customTool(3)
@@ -1703,6 +1770,66 @@ struct Dashboard: View {
         case "dark": return "moon.fill"
         default: return "laptopcomputer"
         }
+    }
+
+    var awakeTool: some View {
+        let active = app.isAwakeActive
+        let tip: String
+        if active {
+            if let rem = app.awakeRemainingSeconds {
+                let h = rem / 3600
+                let m = (rem % 3600) / 60
+                let s = rem % 60
+                let tStr = h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%02d:%02d", m, s)
+                tip = "Awake: \(tStr) remaining (right-click options)"
+            } else {
+                tip = "Awake: Indefinite (right-click options)"
+            }
+        } else {
+            tip = "Prevent Sleep (right-click for timer / options)"
+        }
+        return Image(systemName: active ? "cup.and.saucer.fill" : "cup.and.saucer")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(active ? pal.accent : Color.primary.opacity(0.75))
+            .frame(maxWidth: .infinity)
+            .frame(height: 20)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(active ? pal.accent.opacity(0.18) : pal.track)
+            )
+            .overlay {
+                HoverPad(tip: tip, selected: active, captureHits: true, onClick: {
+                    app.toggleAwake()
+                })
+            }
+            .help(tip)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("Awake mode")
+            .contextMenu {
+                if active {
+                    Button("Deactivate") {
+                        app.stopAwake()
+                    }
+                    Divider()
+                } else {
+                    Button("Keep Awake Indefinitely") {
+                        app.startAwake(duration: nil)
+                    }
+                }
+                Menu("Keep Awake For…") {
+                    Button("15 minutes") { app.startAwake(duration: 15 * 60) }
+                    Button("30 minutes") { app.startAwake(duration: 30 * 60) }
+                    Button("1 hour") { app.startAwake(duration: 60 * 60) }
+                    Button("2 hours") { app.startAwake(duration: 2 * 60 * 60) }
+                    Button("4 hours") { app.startAwake(duration: 4 * 60 * 60) }
+                    Button("8 hours") { app.startAwake(duration: 8 * 60 * 60) }
+                }
+                Divider()
+                Toggle("Prevent Display Sleep", isOn: Binding(
+                    get: { app.preventDisplaySleep },
+                    set: { app.setPreventDisplaySleep($0) }
+                ))
+            }
     }
 
     func tool(_ name: String, _ tip: String, selected: Bool = false, tint: Color? = nil, action: @escaping () -> Void) -> some View {
