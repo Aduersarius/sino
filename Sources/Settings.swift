@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import Combine
 import ServiceManagement
 import SwiftUI
@@ -38,11 +39,15 @@ final class Prefs: ObservableObject {
     @Published var customApp2: String
     @Published var customApp3: String
     @Published var ramProcCount: Int
+    @Published var awakeShortcutKeyCode: Int
+    @Published var awakeShortcutModifiers: UInt
 
     private init() {
         let d = UserDefaults.standard
         interval = (d.object(forKey: "sino.interval") ?? d.object(forKey: "pulse.interval")) as? Double ?? 1
         ramProcCount = (d.object(forKey: "sino.ramProcCount") ?? d.object(forKey: "pulse.ramProcCount")) as? Int ?? 10
+        awakeShortcutKeyCode = (d.object(forKey: "sino.awakeShortcutKeyCode") ?? d.object(forKey: "pulse.awakeShortcutKeyCode")) as? Int ?? kVK_ANSI_A
+        awakeShortcutModifiers = (d.object(forKey: "sino.awakeShortcutModifiers") ?? d.object(forKey: "pulse.awakeShortcutModifiers")) as? UInt ?? UInt(controlKey | optionKey)
         bar = Set(d.stringArray(forKey: "sino.bar") ?? d.stringArray(forKey: "pulse.bar") ?? ["ram", "cpu"])
         let ids = Prefs.modules.map(\.id)
         var order = d.stringArray(forKey: "sino.barOrder") ?? d.stringArray(forKey: "pulse.barOrder") ?? []
@@ -197,6 +202,15 @@ final class Prefs: ObservableObject {
     func setRamProcCount(_ v: Int) {
         ramProcCount = max(3, min(30, v))
         save()
+    }
+
+    func setAwakeShortcut(keyCode: Int, modifiers: UInt) {
+        awakeShortcutKeyCode = keyCode
+        awakeShortcutModifiers = modifiers
+        let d = UserDefaults.standard
+        d.set(keyCode, forKey: "sino.awakeShortcutKeyCode")
+        d.set(modifiers, forKey: "sino.awakeShortcutModifiers")
+        HotKeyManager.shared.update(keyCode: keyCode, modifiers: modifiers)
     }
 
     func setLogin(_ on: Bool) {
@@ -493,6 +507,20 @@ struct SettingsRoot: View {
                 Divider().padding(.leading, 14)
                 row("Quit Sino") {
                     Button("Quit") { NSApp.terminate(nil) }
+                }
+            }
+            section("Sleep Prevention (Awake)") {
+                row("Global shortcut") {
+                    AwakeShortcutRow(prefs: prefs)
+                }
+                Divider().padding(.leading, 14)
+                row("Prevent display sleep") {
+                    Toggle("", isOn: Binding(
+                        get: { app.preventDisplaySleep },
+                        set: { app.setPreventDisplaySleep($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
                 }
             }
             section("Toolbar") {
@@ -1059,5 +1087,222 @@ private extension View {
     }
     func clickHover() -> some View {
         modifier(HoverFill(radius: 6, hugPopup: true))
+    }
+}
+
+func shortcutString(keyCode: Int, modifiers: UInt) -> String {
+    guard keyCode >= 0 else { return "None" }
+    var s = ""
+    if modifiers & UInt(controlKey) != 0 { s += "⌃" }
+    if modifiers & UInt(optionKey) != 0 { s += "⌥" }
+    if modifiers & UInt(shiftKey) != 0 { s += "⇧" }
+    if modifiers & UInt(cmdKey) != 0 { s += "⌘" }
+
+    switch keyCode {
+    case kVK_ANSI_A: s += "A"
+    case kVK_ANSI_B: s += "B"
+    case kVK_ANSI_C: s += "C"
+    case kVK_ANSI_D: s += "D"
+    case kVK_ANSI_E: s += "E"
+    case kVK_ANSI_F: s += "F"
+    case kVK_ANSI_G: s += "G"
+    case kVK_ANSI_H: s += "H"
+    case kVK_ANSI_I: s += "I"
+    case kVK_ANSI_J: s += "J"
+    case kVK_ANSI_K: s += "K"
+    case kVK_ANSI_L: s += "L"
+    case kVK_ANSI_M: s += "M"
+    case kVK_ANSI_N: s += "N"
+    case kVK_ANSI_O: s += "O"
+    case kVK_ANSI_P: s += "P"
+    case kVK_ANSI_Q: s += "Q"
+    case kVK_ANSI_R: s += "R"
+    case kVK_ANSI_S: s += "S"
+    case kVK_ANSI_T: s += "T"
+    case kVK_ANSI_U: s += "U"
+    case kVK_ANSI_V: s += "V"
+    case kVK_ANSI_W: s += "W"
+    case kVK_ANSI_X: s += "X"
+    case kVK_ANSI_Y: s += "Y"
+    case kVK_ANSI_Z: s += "Z"
+    case kVK_ANSI_0: s += "0"
+    case kVK_ANSI_1: s += "1"
+    case kVK_ANSI_2: s += "2"
+    case kVK_ANSI_3: s += "3"
+    case kVK_ANSI_4: s += "4"
+    case kVK_ANSI_5: s += "5"
+    case kVK_ANSI_6: s += "6"
+    case kVK_ANSI_7: s += "7"
+    case kVK_ANSI_8: s += "8"
+    case kVK_ANSI_9: s += "9"
+    case kVK_Space: s += "Space"
+    case kVK_Return: s += "↩"
+    case kVK_Tab: s += "⇥"
+    case kVK_F1: s += "F1"
+    case kVK_F2: s += "F2"
+    case kVK_F3: s += "F3"
+    case kVK_F4: s += "F4"
+    case kVK_F5: s += "F5"
+    case kVK_F6: s += "F6"
+    case kVK_F7: s += "F7"
+    case kVK_F8: s += "F8"
+    case kVK_F9: s += "F9"
+    case kVK_F10: s += "F10"
+    case kVK_F11: s += "F11"
+    case kVK_F12: s += "F12"
+    default: s += "Key(\(keyCode))"
+    }
+    return s
+}
+
+struct AwakeShortcutRow: NSViewRepresentable {
+    @ObservedObject var prefs: Prefs
+
+    func makeNSView(context: Context) -> AwakeShortcutView {
+        let v = AwakeShortcutView()
+        v.prefs = prefs
+        return v
+    }
+
+    func updateNSView(_ nsView: AwakeShortcutView, context: Context) {
+        nsView.prefs = prefs
+        nsView.updateUI()
+    }
+}
+
+final class AwakeShortcutView: NSView {
+    var prefs: Prefs?
+    private let button = NSButton(title: "", target: nil, action: nil)
+    private let clearButton = NSButton(title: "Clear", target: nil, action: nil)
+    private var recording = false
+    private var monitor: Any?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    deinit {
+        stopRecording()
+    }
+
+    private func setup() {
+        button.bezelStyle = .rounded
+        button.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
+        button.target = self
+        button.action = #selector(buttonClicked)
+
+        clearButton.bezelStyle = .inline
+        clearButton.font = .systemFont(ofSize: 11)
+        clearButton.target = self
+        clearButton.action = #selector(clearClicked)
+
+        addSubview(button)
+        addSubview(clearButton)
+    }
+
+    override func layout() {
+        super.layout()
+        button.sizeToFit()
+        clearButton.sizeToFit()
+
+        let btnW = max(70, button.frame.width + 12)
+        let btnH: CGFloat = 22
+        button.frame = NSRect(x: 0, y: (bounds.height - btnH) / 2, width: btnW, height: btnH)
+
+        let clrW = clearButton.frame.width + 6
+        let clrH: CGFloat = 18
+        clearButton.frame = NSRect(x: btnW + 6, y: (bounds.height - clrH) / 2, width: clrW, height: clrH)
+    }
+
+    override var intrinsicContentSize: NSSize {
+        button.sizeToFit()
+        clearButton.sizeToFit()
+        let btnW = max(70, button.frame.width + 12)
+        let clrW = (prefs?.awakeShortcutKeyCode ?? -1) >= 0 && !recording ? clearButton.frame.width + 12 : 0
+        return NSSize(width: btnW + clrW, height: 24)
+    }
+
+    func updateUI() {
+        guard !recording else {
+            button.title = "Type shortcut…"
+            clearButton.isHidden = true
+            invalidateIntrinsicContentSize()
+            needsLayout = true
+            return
+        }
+        let code = prefs?.awakeShortcutKeyCode ?? -1
+        let mods = prefs?.awakeShortcutModifiers ?? 0
+        button.title = shortcutString(keyCode: code, modifiers: mods)
+        clearButton.isHidden = (code < 0)
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    @objc private func buttonClicked() {
+        if recording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+
+    @objc private func clearClicked() {
+        stopRecording()
+        prefs?.setAwakeShortcut(keyCode: -1, modifiers: 0)
+        updateUI()
+    }
+
+    private func startRecording() {
+        stopRecording()
+        recording = true
+        updateUI()
+
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self else { return event }
+            if event.keyCode == 53 { // Esc
+                self.stopRecording()
+                return nil
+            }
+            if event.keyCode == 51 && event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty { // Backspace
+                self.prefs?.setAwakeShortcut(keyCode: -1, modifiers: 0)
+                self.stopRecording()
+                return nil
+            }
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            let isFKey = (event.keyCode >= 96 && event.keyCode <= 101) || event.keyCode == 103 || event.keyCode == 109 || event.keyCode == 111 || event.keyCode == 118 || event.keyCode == 120 || event.keyCode == 122
+            if !flags.isEmpty || isFKey {
+                var carbonMods: UInt = 0
+                if flags.contains(.command) { carbonMods |= UInt(cmdKey) }
+                if flags.contains(.option) { carbonMods |= UInt(optionKey) }
+                if flags.contains(.control) { carbonMods |= UInt(controlKey) }
+                if flags.contains(.shift) { carbonMods |= UInt(shiftKey) }
+                self.prefs?.setAwakeShortcut(keyCode: Int(event.keyCode), modifiers: carbonMods)
+                self.stopRecording()
+                return nil
+            }
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        recording = false
+        if let m = monitor {
+            NSEvent.removeMonitor(m)
+            monitor = nil
+        }
+        updateUI()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            stopRecording()
+        }
+        super.viewWillMove(toWindow: newWindow)
     }
 }

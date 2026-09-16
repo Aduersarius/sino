@@ -10,7 +10,7 @@ swiftc -parse-as-library -O -module-name Sino \
   -target arm64-apple-macos14.0 \
   -sdk "$SDK" \
   -import-objc-header "$ROOT/Sources/Bridging.h" \
-  -framework SwiftUI -framework AppKit -framework IOKit -framework Combine -framework ServiceManagement -framework SystemConfiguration -framework CoreWLAN -framework CoreLocation -framework UserNotifications \
+  -framework SwiftUI -framework AppKit -framework IOKit -framework Combine -framework ServiceManagement -framework SystemConfiguration -framework CoreWLAN -framework CoreLocation -framework UserNotifications -framework Carbon \
   -o "$BIN" \
   "$ROOT/Sources/SMC.c" "$ROOT/Sources/Sampler.swift" "$ROOT/Sources/SinoApp.swift" "$ROOT/Sources/Settings.swift"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"

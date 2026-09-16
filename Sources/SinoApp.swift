@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import Combine
 import IOKit.pwr_mgt
 import SwiftUI
@@ -67,6 +68,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             self.refreshMenu()
         }
         Updater.shared.start()
+        HotKeyManager.shared.update(keyCode: prefs.awakeShortcutKeyCode, modifiers: prefs.awakeShortcutModifiers)
         if let img = NSImage(named: "AppIcon") { NSApp.applicationIconImage = img }
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Sino", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
@@ -606,6 +608,36 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         settingsWC?.showWindow(nil)
         settingsWC?.window?.makeKeyAndOrderFront(nil)
         settingsWC?.window?.orderFrontRegardless()
+    }
+}
+
+final class HotKeyManager {
+    static let shared = HotKeyManager()
+    private var hotKeyRef: EventHotKeyRef?
+    private var eventHandler: EventHandlerRef?
+
+    init() {
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { (_, _, _) -> OSStatus in
+            DispatchQueue.main.async {
+                App.shared.toggleAwake()
+            }
+            return noErr
+        }, 1, &eventType, nil, &eventHandler)
+    }
+
+    func update(keyCode: Int, modifiers: UInt) {
+        if let ref = hotKeyRef {
+            UnregisterEventHotKey(ref)
+            hotKeyRef = nil
+        }
+        guard keyCode >= 0 else { return }
+        let hotKeyID = EventHotKeyID(signature: 0x53494E4F, id: 1)
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), hotKeyID, GetApplicationEventTarget(), 0, &ref)
+        if status == noErr {
+            hotKeyRef = ref
+        }
     }
 }
 
