@@ -1548,22 +1548,8 @@ struct Dashboard: View {
                 }
             }
             Card("ADDRESSES", "globe", pal) {
-                // Local IPv4 pill
-                HStack(spacing: 7) {
-                    Image(systemName: "info.circle")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 14, alignment: .center)
-                    Text("Local IPv4")
-                        .font(.system(size: 11, weight: .semibold))
-                    Spacer()
-                    Text(snap.netIPv4)
-                        .font(.system(size: 11).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(pal.track.opacity(0.6), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                // Local IPv4
+                GeoInfoRow(icon: "info.circle", title: "Local IPv4", value: snap.netIPv4)
 
                 // Public IPv4
                 GeoInfoRow(icon: "globe", title: "Public IPv4", value: snap.netGeo.publicIPv4 != "—" ? snap.netGeo.publicIPv4 : snap.publicIP)
@@ -1739,8 +1725,27 @@ struct Dashboard: View {
 
     var toolbar: some View {
         HStack(spacing: 4) {
+            ForEach(app.prefs.toolbarOrder, id: \.self) { id in
+                if app.prefs.toolbar.contains(id) {
+                    toolbarItem(for: id)
+                }
+            }
+            // Settings button permanently pinned on the right
+            tool("gearshape.fill", "Settings") { app.openSettings() }
+        }
+        .padding(4)
+        .frame(maxWidth: .infinity)
+        .background(pal.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    @ViewBuilder
+    func toolbarItem(for id: String) -> some View {
+        switch id {
+        case "activity":
             tool("waveform.path.ecg", "Activity Monitor") { App.shared.openUtil("Activity Monitor") }
+        case "terminal":
             tool("terminal.fill", "Terminal") { App.shared.openUtil("Terminal") }
+        case "interval":
             Text(intervalLabel)
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Color.primary.opacity(0.8))
@@ -1750,16 +1755,19 @@ struct Dashboard: View {
                 .overlay { HoverPad(tip: "Refresh interval — click to cycle", captureHits: true, onClick: { App.shared.cycleInterval() }) }
                 .help("Refresh interval — click to cycle")
                 .accessibilityAddTraits(.isButton)
+        case "theme":
             tool(themeIcon, "Theme") { App.shared.cycleTheme() }
+        case "awake":
             awakeTool
+        case "app1":
             customTool(1)
+        case "app2":
             customTool(2)
+        case "app3":
             customTool(3)
-            tool("gearshape.fill", "Settings") { app.openSettings() }
+        default:
+            EmptyView()
         }
-        .padding(4)
-        .frame(maxWidth: .infinity)
-        .background(pal.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     func customTool(_ slot: Int) -> some View {

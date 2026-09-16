@@ -25,11 +25,23 @@ final class Prefs: ObservableObject {
         ("header", "Header"),
         ("window", "Window")
     ]
+    static let toolbarButtons: [(id: String, title: String, icon: String)] = [
+        ("activity", "Activity Monitor", "waveform.path.ecg"),
+        ("terminal", "Terminal", "terminal.fill"),
+        ("interval", "Refresh Interval", "timer"),
+        ("theme", "Theme", "sun.max.fill"),
+        ("awake", "Awake (Amphetamine)", "cup.and.saucer.fill"),
+        ("app1", "Shortcut App 1", "plus.app"),
+        ("app2", "Shortcut App 2", "plus.app"),
+        ("app3", "Shortcut App 3", "plus.app")
+    ]
 
     @Published var interval: Double
     @Published var bar: Set<String>
     @Published var barOrder: [String]
     @Published var drop: Set<String>
+    @Published var toolbar: Set<String>
+    @Published var toolbarOrder: [String]
     @Published var login: Bool
     @Published var colors: [String: [Double]]
     @Published var frost: String
@@ -55,6 +67,12 @@ final class Prefs: ObservableObject {
         for id in ids where !order.contains(id) { order.append(id) }
         barOrder = order
         drop = Set(d.stringArray(forKey: "sino.drop") ?? d.stringArray(forKey: "pulse.drop") ?? Prefs.modules.map(\.id))
+        let toolIds = Prefs.toolbarButtons.map(\.id)
+        toolbar = Set(d.stringArray(forKey: "sino.toolbar") ?? toolIds)
+        var tOrder = d.stringArray(forKey: "sino.toolbarOrder") ?? []
+        tOrder = tOrder.filter { toolIds.contains($0) }
+        for id in toolIds where !tOrder.contains(id) { tOrder.append(id) }
+        toolbarOrder = tOrder
         login = (d.object(forKey: "sino.login") ?? d.object(forKey: "pulse.login")) as? Bool ?? false
         var cols = (d.object(forKey: "sino.colors") ?? d.object(forKey: "pulse.colors")) as? [String: [Double]] ?? [:]
         if cols["outline"] == nil, (d.object(forKey: "sino.strokeA") ?? d.object(forKey: "pulse.strokeA")) != nil {
@@ -110,6 +128,8 @@ final class Prefs: ObservableObject {
         d.set(Array(bar), forKey: "sino.bar")
         d.set(barOrder, forKey: "sino.barOrder")
         d.set(Array(drop), forKey: "sino.drop")
+        d.set(Array(toolbar), forKey: "sino.toolbar")
+        d.set(toolbarOrder, forKey: "sino.toolbarOrder")
         d.set(login, forKey: "sino.login")
         d.set(colors, forKey: "sino.colors")
         d.set(frost, forKey: "sino.frost")
@@ -131,6 +151,17 @@ final class Prefs: ObservableObject {
                     self.bar.remove(id)
                     if self.bar.isEmpty { self.bar.insert("cpu") }
                 }
+                self.save()
+            }
+        )
+    }
+
+    func toolbarBind(_ id: String) -> Binding<Bool> {
+        Binding(
+            get: { self.toolbar.contains(id) },
+            set: { on in
+                if on { self.toolbar.insert(id) }
+                else { self.toolbar.remove(id) }
                 self.save()
             }
         )
@@ -446,6 +477,7 @@ struct SettingsRoot: View {
         case "appear": appearancePage
         case "bar": barPage
         case "drop": modulesPage(bind: prefs.dropBind)
+        case "toolbar": toolbarPage
         case "about": aboutPage
         default: generalPage
         }
@@ -667,6 +699,19 @@ struct SettingsRoot: View {
         }
     }
 
+    var toolbarPage: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SettingsGroup {
+                ToolbarOrderTable(prefs: prefs)
+                    .frame(height: CGFloat(max(prefs.toolbarOrder.count, 1)) * 36)
+            }
+            Text("Drag to reorder buttons. Settings button remains pinned on the right.")
+                .font(Chrome.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+        }
+    }
+
     var aboutPage: some View {
         VStack(alignment: .leading, spacing: 16) {
             section("Sino") {
@@ -718,6 +763,7 @@ struct SettingsRoot: View {
             nav("appear", "Appearance", "paintpalette.fill", Color(red: 1.0, green: 0.35, blue: 0.55))
             nav("bar", "Menu Bar", "menubar.rectangle", Color(red: 0.20, green: 0.48, blue: 1.0))
             nav("drop", "Dropdown", "rectangle.split.2x1", Color(red: 0.62, green: 0.35, blue: 0.95))
+            nav("toolbar", "Toolbar", "menubar.dock.rectangle", Color(red: 0.95, green: 0.55, blue: 0.15))
             nav("about", "About", "info.circle.fill", Color(red: 0.20, green: 0.52, blue: 0.96))
             Spacer(minLength: 0)
         }
@@ -863,6 +909,167 @@ struct BarOrderTable: NSViewRepresentable {
             guard let s = info.draggingPasteboard.string(forType: .string), let from = Int(s) else { return false }
             guard from != row, from + 1 != row else { return true }
             prefs.barOrder.move(fromOffsets: IndexSet(integer: from), toOffset: row)
+            prefs.save()
+            tableView.reloadData()
+            return true
+        }
+
+        func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
+            dragging = true
+        }
+
+        func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+            dragging = false
+            tableView.reloadData()
+        }
+    }
+}
+
+struct ToolbarOrderTable: NSViewRepresentable {
+    @ObservedObject var prefs: Prefs
+
+    func makeCoordinator() -> Coord { Coord(prefs: prefs) }
+
+    func makeNSView(context: Context) -> NSTableView {
+        let tv = NSTableView()
+        tv.headerView = nil
+        tv.backgroundColor = .clear
+        tv.selectionHighlightStyle = .none
+        tv.allowsEmptySelection = true
+        tv.allowsMultipleSelection = false
+        tv.usesAlternatingRowBackgroundColors = false
+        tv.rowHeight = 36
+        tv.intercellSpacing = .zero
+        tv.style = .plain
+        tv.delegate = context.coordinator
+        tv.dataSource = context.coordinator
+        tv.registerForDraggedTypes([.string])
+        tv.draggingDestinationFeedbackStyle = .gap
+        tv.setDraggingSourceOperationMask(.move, forLocal: true)
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("t"))
+        col.resizingMask = .autoresizingMask
+        tv.addTableColumn(col)
+        tv.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        context.coordinator.table = tv
+        return tv
+    }
+
+    func updateNSView(_ tv: NSTableView, context: Context) {
+        context.coordinator.prefs = prefs
+        guard !context.coordinator.dragging else { return }
+        tv.reloadData()
+        tv.sizeLastColumnToFit()
+    }
+
+    final class Coord: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        var prefs: Prefs
+        weak var table: NSTableView?
+        var dragging = false
+        init(prefs: Prefs) { self.prefs = prefs }
+
+        func numberOfRows(in tableView: NSTableView) -> Int { prefs.toolbarOrder.count }
+
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            QuietRow()
+        }
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            let id = prefs.toolbarOrder[row]
+            let item = Prefs.toolbarButtons.first(where: { $0.id == id })
+            let title: String
+            if id == "app1" {
+                title = prefs.customApp.isEmpty ? "Shortcut App 1" : "App 1 (\(prefs.customAppName(slot: 1)))"
+            } else if id == "app2" {
+                title = prefs.customApp2.isEmpty ? "Shortcut App 2" : "App 2 (\(prefs.customAppName(slot: 2)))"
+            } else if id == "app3" {
+                title = prefs.customApp3.isEmpty ? "Shortcut App 3" : "App 3 (\(prefs.customAppName(slot: 3)))"
+            } else {
+                title = item?.title ?? id
+            }
+
+            let cell = NSTableCellView()
+            let grip = NSImageView()
+            grip.image = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "Reorder")
+            grip.contentTintColor = .tertiaryLabelColor
+            grip.translatesAutoresizingMaskIntoConstraints = false
+
+            let icon = NSImageView()
+            if let customIcon = customAppIcon(for: id) {
+                icon.image = customIcon
+            } else {
+                icon.image = NSImage(systemSymbolName: item?.icon ?? "square", accessibilityDescription: nil)
+                icon.contentTintColor = .secondaryLabelColor
+            }
+            icon.translatesAutoresizingMaskIntoConstraints = false
+
+            let lab = NSTextField(labelWithString: title)
+            lab.font = .systemFont(ofSize: 13)
+            lab.translatesAutoresizingMaskIntoConstraints = false
+
+            let sw = NSSwitch()
+            sw.state = prefs.toolbar.contains(id) ? .on : .off
+            sw.identifier = NSUserInterfaceItemIdentifier(id)
+            sw.target = self
+            sw.action = #selector(tog(_:))
+            sw.translatesAutoresizingMaskIntoConstraints = false
+
+            cell.addSubview(grip)
+            cell.addSubview(icon)
+            cell.addSubview(lab)
+            cell.addSubview(sw)
+
+            NSLayoutConstraint.activate([
+                grip.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+                grip.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                grip.widthAnchor.constraint(equalToConstant: 16),
+                grip.heightAnchor.constraint(equalToConstant: 16),
+
+                icon.leadingAnchor.constraint(equalTo: grip.trailingAnchor, constant: 10),
+                icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                icon.widthAnchor.constraint(equalToConstant: 18),
+                icon.heightAnchor.constraint(equalToConstant: 18),
+
+                lab.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+                lab.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+
+                sw.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -14),
+                sw.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                lab.trailingAnchor.constraint(lessThanOrEqualTo: sw.leadingAnchor, constant: -8)
+            ])
+            return cell
+        }
+
+        private func customAppIcon(for id: String) -> NSImage? {
+            switch id {
+            case "app1": return prefs.customAppIcon(slot: 1)
+            case "app2": return prefs.customAppIcon(slot: 2)
+            case "app3": return prefs.customAppIcon(slot: 3)
+            default: return nil
+            }
+        }
+
+        @objc func tog(_ sender: NSSwitch) {
+            let id = sender.identifier?.rawValue ?? ""
+            prefs.toolbarBind(id).wrappedValue = sender.state == .on
+            table?.reloadData()
+        }
+
+        func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+            let item = NSPasteboardItem()
+            item.setString("\(row)", forType: .string)
+            return item
+        }
+
+        func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+            guard dropOperation == .above else { return [] }
+            tableView.setDropRow(row, dropOperation: .above)
+            return .move
+        }
+
+        func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+            guard let s = info.draggingPasteboard.string(forType: .string), let from = Int(s) else { return false }
+            guard from != row, from + 1 != row else { return true }
+            prefs.toolbarOrder.move(fromOffsets: IndexSet(integer: from), toOffset: row)
             prefs.save()
             tableView.reloadData()
             return true
