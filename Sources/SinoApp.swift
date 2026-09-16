@@ -1068,92 +1068,101 @@ struct Dashboard: View {
 
     var mainColumn: some View {
         VStack(spacing: 4) {
-            if shown("cpu") {
-                Card("CPU", "cpu", pal, panel: .cpu, active: app.panel == .cpu) {
-                    Sparkline(values: snap.cpuHistory, color: pal.accent)
-                        .frame(height: 22)
-                        .padding(.bottom, 1)
-                    let u = max(0, snap.cpuUser)
-                    let s = max(0, snap.cpuSystem)
-                    CPULoadBar(user: u, system: s, accent: NSColor(pal.accent), track: NSColor(pal.track))
-                        .frame(height: 8)
+            ForEach(app.prefs.dropOrder, id: \.self) { id in
+                if shown(id) {
+                    mainCard(for: id)
                 }
             }
-            if shown("ram") {
-                Card("RAM", "memorychip", pal, panel: .ram, active: app.panel == .ram) {
-                    Bar(snap.ramPressure, pal.accent, pal.track).padding(.bottom, 1)
-                    HStack {
-                        Text("Pressure").font(Palette.body)
-                        Spacer()
-                        Text(pct0(snap.ramPressure)).font(Palette.body).foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("Used").font(Palette.body)
-                        Spacer()
-                        Text("\(bytesGB(snap.ramUsed)) / \(bytesGB(snap.ramTotal))").font(Palette.body).foregroundStyle(.secondary)
-                    }
-                    if snap.ramSwapTotal > 0 {
-                        HStack {
-                            Text("Swap").font(Palette.body)
-                            Spacer()
-                            Text("\(bytesGB(snap.ramSwapUsed)) / \(bytesGB(snap.ramSwapTotal))").font(Palette.body).foregroundStyle(.secondary)
-                        }
-                    }
-                }
+            toolbar
+        }
+        .frame(width: 256)
+    }
+
+    @ViewBuilder
+    func mainCard(for id: String) -> some View {
+        switch id {
+        case "cpu":
+            Card("CPU", "cpu", pal, panel: .cpu, active: app.panel == .cpu) {
+                Sparkline(values: snap.cpuHistory, color: pal.accent)
+                    .frame(height: 22)
+                    .padding(.bottom, 1)
+                let u = max(0, snap.cpuUser)
+                let s = max(0, snap.cpuSystem)
+                CPULoadBar(user: u, system: s, accent: NSColor(pal.accent), track: NSColor(pal.track))
+                    .frame(height: 8)
             }
-            if shown("gpu") {
-                Card("GPU", "display", pal, panel: .gpu, active: app.panel == .gpu) {
-                    Text(snap.gpuName).font(Palette.body)
-                    Bar(snap.gpuUsage, pal.accent, pal.track)
-                    HStack {
-                        Text(pct0(snap.gpuUsage)).font(Palette.body).foregroundStyle(.secondary)
-                        Spacer()
-                    }
+        case "ram":
+            Card("RAM", "memorychip", pal, panel: .ram, active: app.panel == .ram) {
+                Bar(snap.ramPressure, pal.accent, pal.track).padding(.bottom, 1)
+                HStack {
+                    Text("Pressure").font(Palette.body)
+                    Spacer()
+                    Text(pct0(snap.ramPressure)).font(Palette.body).foregroundStyle(.secondary)
                 }
-            }
-            if shown("storage") {
-                Card("STORAGE", "internaldrive", pal, panel: .storage, active: app.panel == .storage) {
+                HStack {
+                    Text("Used").font(Palette.body)
+                    Spacer()
+                    Text("\(bytesGB(snap.ramUsed)) / \(bytesGB(snap.ramTotal))").font(Palette.body).foregroundStyle(.secondary)
+                }
+                if snap.ramSwapTotal > 0 {
                     HStack {
-                        Text(snap.diskName).font(Palette.body)
+                        Text("Swap").font(Palette.body)
                         Spacer()
-                        Image(systemName: "heart.fill").foregroundStyle(.pink).font(.system(size: 11))
-                    }
-                    Bar(snap.diskUsedPct, pal.accent, pal.track)
-                    HStack {
-                        Text("\(bytesGB(snap.diskAvail, giB: false)) available").font(Palette.body)
-                        Spacer()
-                        Text(pct0(snap.diskUsedPct)).font(Palette.body).foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("Write \(rate(snap.diskWrite))").font(Palette.tiny).foregroundStyle(NetChart.upCol)
-                        Spacer()
-                        Text("Read \(rate(snap.diskRead))").font(Palette.tiny).foregroundStyle(NetChart.downCol)
+                        Text("\(bytesGB(snap.ramSwapUsed)) / \(bytesGB(snap.ramSwapTotal))").font(Palette.body).foregroundStyle(.secondary)
                     }
                 }
             }
-            if shown("net") {
-                Card("NETWORK", snap.wifi ? "wifi" : "cable.connector", pal, panel: .net, active: app.panel == .net) {
-                    HStack(alignment: .firstTextBaseline) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(rate(snap.netOut)).font(.system(size: 15, weight: .semibold).monospacedDigit())
-                            Text("Upload").font(Palette.tiny).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 1) {
-                            Text(rate(snap.netIn)).font(.system(size: 15, weight: .semibold).monospacedDigit())
-                            Text("Download").font(Palette.tiny).foregroundStyle(.secondary)
-                        }
-                    }
-                    NetChart(up: snap.netOutHistory, down: snap.netInHistory)
-                        .frame(height: 36)
-                    HStack {
-                        Image(systemName: snap.wifi ? "wifi" : "cable.connector").foregroundStyle(NetChart.downCol)
-                        Text(snap.netSSID != "—" ? snap.netSSID : snap.netName).font(Palette.body)
-                        Spacer()
-                    }
+        case "gpu":
+            Card("GPU", "display", pal, panel: .gpu, active: app.panel == .gpu) {
+                Text(snap.gpuName).font(Palette.body)
+                Bar(snap.gpuUsage, pal.accent, pal.track)
+                HStack {
+                    Text(pct0(snap.gpuUsage)).font(Palette.body).foregroundStyle(.secondary)
+                    Spacer()
                 }
             }
-            if shown("fans"), !snap.fans.isEmpty {
+        case "storage":
+            Card("STORAGE", "internaldrive", pal, panel: .storage, active: app.panel == .storage) {
+                HStack {
+                    Text(snap.diskName).font(Palette.body)
+                    Spacer()
+                    Image(systemName: "heart.fill").foregroundStyle(.pink).font(.system(size: 11))
+                }
+                Bar(snap.diskUsedPct, pal.accent, pal.track)
+                HStack {
+                    Text("\(bytesGB(snap.diskAvail, giB: false)) available").font(Palette.body)
+                    Spacer()
+                    Text(pct0(snap.diskUsedPct)).font(Palette.body).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Text("Write \(rate(snap.diskWrite))").font(Palette.tiny).foregroundStyle(NetChart.upCol)
+                    Spacer()
+                    Text("Read \(rate(snap.diskRead))").font(Palette.tiny).foregroundStyle(NetChart.downCol)
+                }
+            }
+        case "net":
+            Card("NETWORK", snap.wifi ? "wifi" : "cable.connector", pal, panel: .net, active: app.panel == .net) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(rate(snap.netOut)).font(.system(size: 15, weight: .semibold).monospacedDigit())
+                        Text("Upload").font(Palette.tiny).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(rate(snap.netIn)).font(.system(size: 15, weight: .semibold).monospacedDigit())
+                        Text("Download").font(Palette.tiny).foregroundStyle(.secondary)
+                    }
+                }
+                NetChart(up: snap.netOutHistory, down: snap.netInHistory)
+                    .frame(height: 36)
+                HStack {
+                    Image(systemName: snap.wifi ? "wifi" : "cable.connector").foregroundStyle(NetChart.downCol)
+                    Text(snap.netSSID != "—" ? snap.netSSID : snap.netName).font(Palette.body)
+                    Spacer()
+                }
+            }
+        case "fans":
+            if !snap.fans.isEmpty {
                 Card("FANS", "fan", pal, panel: .fans, active: app.panel == .fans) {
                     ForEach(snap.fans) { f in
                         HStack {
@@ -1168,36 +1177,35 @@ struct Dashboard: View {
                     }
                 }
             }
-            if shown("battery") {
-                Card("BATTERY", "battery.100percent", pal, panel: .battery, active: app.panel == .battery) {
+        case "battery":
+            Card("BATTERY", "battery.100percent", pal, panel: .battery, active: app.panel == .battery) {
+                HStack {
+                    Text("Charge").font(Palette.body)
+                    Spacer()
+                    Text(pct0(snap.battCharge)).font(Palette.body).foregroundStyle(.secondary)
+                    Bar(snap.battCharge, chargeColor(snap.battCharge), pal.track, charging: snap.charging).frame(width: 52)
+                }
+                HStack {
+                    Text(snap.charging ? "Until Full" : "Time Left").font(Palette.body)
+                    Spacer()
+                    Text(batteryTimeRemainingText).font(Palette.body).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Text("Battery Cycles").font(Palette.body)
+                    Spacer()
+                    Text("\(snap.battCycles)").font(Palette.body).foregroundStyle(.secondary)
+                }
+                if snap.systemLoadW > 0 || snap.adapterPowerW > 0 {
                     HStack {
-                        Text("Charge").font(Palette.body)
+                        Text("System Load").font(Palette.body)
                         Spacer()
-                        Text(pct0(snap.battCharge)).font(Palette.body).foregroundStyle(.secondary)
-                        Bar(snap.battCharge, chargeColor(snap.battCharge), pal.track, charging: snap.charging).frame(width: 52)
-                    }
-                    HStack {
-                        Text(snap.charging ? "Until Full" : "Time Left").font(Palette.body)
-                        Spacer()
-                        Text(batteryTimeRemainingText).font(Palette.body).foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("Battery Cycles").font(Palette.body)
-                        Spacer()
-                        Text("\(snap.battCycles)").font(Palette.body).foregroundStyle(.secondary)
-                    }
-                    if snap.systemLoadW > 0 || snap.adapterPowerW > 0 {
-                        HStack {
-                            Text("System Load").font(Palette.body)
-                            Spacer()
-                            Text(watts(snap.systemLoadW)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
-                        }
+                        Text(watts(snap.systemLoadW)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
                     }
                 }
             }
-            toolbar
+        default:
+            EmptyView()
         }
-        .frame(width: 256)
     }
 
     var batteryTimeRemainingText: String {
@@ -1218,13 +1226,48 @@ struct Dashboard: View {
     var sideColumn: some View {
         VStack(spacing: 4) {
             switch app.panel {
-            case .cpu: cpuSide
-            case .ram: ramSide
-            case .gpu: gpuSide
-            case .storage: storageSide
-            case .net: netSide
-            case .fans: fansSide
-            case .battery: batterySide
+            case .cpu:
+                ForEach(app.prefs.sideOrder["cpu"] ?? ["cores", "procs", "gpu"], id: \.self) { sec in
+                    if app.prefs.isSideVisible("cpu", sec) {
+                        cpuSection(sec)
+                    }
+                }
+            case .ram:
+                ForEach(app.prefs.sideOrder["ram"] ?? ["memory", "procs"], id: \.self) { sec in
+                    if app.prefs.isSideVisible("ram", sec) {
+                        ramSection(sec)
+                    }
+                }
+            case .gpu:
+                ForEach(app.prefs.sideOrder["gpu"] ?? ["gpu"], id: \.self) { sec in
+                    if app.prefs.isSideVisible("gpu", sec) {
+                        gpuSection(sec)
+                    }
+                }
+            case .storage:
+                ForEach(app.prefs.sideOrder["storage"] ?? ["activity", "volumes"], id: \.self) { sec in
+                    if app.prefs.isSideVisible("storage", sec) {
+                        storageSection(sec)
+                    }
+                }
+            case .net:
+                ForEach(app.prefs.sideOrder["net"] ?? ["chart", "wifi", "addresses", "topProc"], id: \.self) { sec in
+                    if app.prefs.isSideVisible("net", sec) {
+                        netSection(sec)
+                    }
+                }
+            case .fans:
+                ForEach(app.prefs.sideOrder["fans"] ?? ["fans", "sensors"], id: \.self) { sec in
+                    if app.prefs.isSideVisible("fans", sec) {
+                        fansSection(sec)
+                    }
+                }
+            case .battery:
+                ForEach(app.prefs.sideOrder["battery"] ?? ["battery", "energy"], id: \.self) { sec in
+                    if app.prefs.isSideVisible("battery", sec) {
+                        batterySection(sec)
+                    }
+                }
             case nil: EmptyView()
             }
         }
@@ -1232,8 +1275,10 @@ struct Dashboard: View {
         .contentShape(Rectangle())
     }
 
-    var cpuSide: some View {
-        Group {
+    @ViewBuilder
+    func cpuSection(_ sec: String) -> some View {
+        switch sec {
+        case "cores":
             Card("CPU CORES", "cpu", pal) {
                 let pCores = snap.cores.filter { $0.name.contains("Performance") }
                 let eCores = snap.cores.filter { $0.name.contains("Efficiency") }
@@ -1273,6 +1318,7 @@ struct Dashboard: View {
                     }
                 }
             }
+        case "procs":
             Card("CPU USAGE", "square.grid.2x2", pal) {
                 ForEach(snap.processes) { p in
                     HStack(spacing: 5) {
@@ -1293,6 +1339,7 @@ struct Dashboard: View {
                     }
                 }
             }
+        case "gpu":
             Card("GPU", "display", pal) {
                 Text(snap.gpuName).font(Palette.body)
                 Bar(snap.gpuUsage, pal.accent, pal.track)
@@ -1307,11 +1354,15 @@ struct Dashboard: View {
                     Text(bytesGB(snap.gpuMemUsed)).font(Palette.body).foregroundStyle(.secondary)
                 }
             }
+        default:
+            EmptyView()
         }
     }
 
-    var ramSide: some View {
-        Group {
+    @ViewBuilder
+    func ramSection(_ sec: String) -> some View {
+        switch sec {
+        case "memory":
             Card("MEMORY", "memorychip", pal) {
                 Sparkline(values: snap.ramHistory, color: pal.accent)
                     .frame(height: 38)
@@ -1389,6 +1440,7 @@ struct Dashboard: View {
                     .help("Quick RAM Clean (evacuate purgeable caches)")
                 }
             }
+        case "procs":
             Card("PROCESSES", "square.grid.2x2", pal) {
                 ForEach(snap.memProcesses.prefix(app.prefs.ramProcCount)) { p in
                     HStack(spacing: 5) {
@@ -1410,10 +1462,13 @@ struct Dashboard: View {
                     }
                 }
             }
+        default:
+            EmptyView()
         }
     }
 
-    var gpuSide: some View {
+    @ViewBuilder
+    func gpuSection(_ sec: String) -> some View {
         Card("GPU", "display", pal) {
             HStack {
                 Text(snap.gpuName).font(Palette.body)
@@ -1448,8 +1503,10 @@ struct Dashboard: View {
         }
     }
 
-    var storageSide: some View {
-        Group {
+    @ViewBuilder
+    func storageSection(_ sec: String) -> some View {
+        switch sec {
+        case "activity":
             Card("STORAGE ACTIVITY", "externaldrive.connected.to.line.below", pal) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 1) {
@@ -1474,6 +1531,7 @@ struct Dashboard: View {
                     Text(rate(snap.diskReadPeak)).font(Palette.tiny.monospacedDigit())
                 }
             }
+        case "volumes":
             Card("VOLUMES", "internaldrive", pal) {
                 ForEach(snap.volumes) { v in
                     VStack(alignment: .leading, spacing: 4) {
@@ -1488,11 +1546,15 @@ struct Dashboard: View {
                     .padding(.bottom, 4)
                 }
             }
+        default:
+            EmptyView()
         }
     }
 
-    var netSide: some View {
-        Group {
+    @ViewBuilder
+    func netSection(_ sec: String) -> some View {
+        switch sec {
+        case "chart":
             Card("NETWORK", snap.wifi ? "wifi" : "cable.connector", pal) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 1) {
@@ -1523,6 +1585,7 @@ struct Dashboard: View {
                     Text(snap.netInterface).font(Palette.tiny.monospaced()).foregroundStyle(.secondary)
                 }
             }
+        case "wifi":
             if snap.wifi {
                 Card("WI-FI DETAILS", "wifi.badge.checkmark", pal) {
                     if snap.netSSID != "—" {
@@ -1547,43 +1610,28 @@ struct Dashboard: View {
                     GeoInfoRow(icon: "cable.connector.horizontal", title: "Interface", value: snap.netInterface)
                 }
             }
+        case "addresses":
             Card("ADDRESSES", "globe", pal) {
-                // Local IPv4
                 GeoInfoRow(icon: "info.circle", title: "Local IPv4", value: snap.netIPv4)
-
-                // Public IPv4
                 GeoInfoRow(icon: "globe", title: "Public IPv4", value: snap.netGeo.publicIPv4 != "—" ? snap.netGeo.publicIPv4 : snap.publicIP)
-
-                // Location
                 if snap.netGeo.location != "—" {
                     GeoInfoRow(icon: "map", title: "Location", value: snap.netGeo.location)
                 }
-
-                // GeoCoordinates
                 if snap.netGeo.geoCoordinates != "—" {
                     GeoInfoRow(icon: "mappin.and.ellipse", title: "GeoCoordinates", value: snap.netGeo.geoCoordinates)
                 }
-
-                // Timezone
                 if snap.netGeo.timezone != "—" {
                     GeoInfoRow(icon: "clock", title: "Timezone", value: snap.netGeo.timezone)
                 }
-
-                // AS
                 if snap.netGeo.asName != "—" {
                     GeoInfoRow(icon: "point.3.filled.connected.trianglepath.dotted", title: "AS", value: snap.netGeo.asName)
                 }
-
-                // ISP
                 if snap.netGeo.isp != "—" {
                     GeoInfoRow(icon: "antenna.radiowaves.left.and.right", title: "ISP", value: snap.netGeo.isp)
                 }
-
-                // Organization
                 if snap.netGeo.organization != "—" {
                     GeoInfoRow(icon: "building.2", title: "Organization", value: snap.netGeo.organization)
                 }
-
                 if snap.netRouter != "—" {
                     Divider().padding(.vertical, 1)
                     HStack {
@@ -1611,6 +1659,7 @@ struct Dashboard: View {
                 .buttonStyle(.plain)
                 .help("Refresh Public IP & Geolocation")
             }
+        case "topProc":
             if snap.netTopName != "—" {
                 Card("TOP PROCESS", "square.grid.2x2", pal) {
                     HStack(spacing: 5) {
@@ -1621,11 +1670,15 @@ struct Dashboard: View {
                     }
                 }
             }
+        default:
+            EmptyView()
         }
     }
 
-    var fansSide: some View {
-        Group {
+    @ViewBuilder
+    func fansSection(_ sec: String) -> some View {
+        switch sec {
+        case "fans":
             Card("FANS", "fan", pal) {
                 Sparkline(values: snap.fanHistory, color: pal.accent)
                     .frame(height: 38)
@@ -1641,6 +1694,7 @@ struct Dashboard: View {
                     }
                 }
             }
+        case "sensors":
             if !snap.temps.isEmpty {
                 Card("SENSORS", "thermometer", pal) {
                     ForEach(snap.temps) { t in
@@ -1654,11 +1708,15 @@ struct Dashboard: View {
                     }
                 }
             }
+        default:
+            EmptyView()
         }
     }
 
-    var batterySide: some View {
-        Group {
+    @ViewBuilder
+    func batterySection(_ sec: String) -> some View {
+        switch sec {
+        case "battery":
             Card("BATTERY", "battery.100percent", pal) {
                 HStack {
                     Text("Charge").font(Palette.body)
@@ -1700,6 +1758,7 @@ struct Dashboard: View {
                     .padding(.top, 2)
                 }
             }
+        case "energy":
             Card("ENERGY", "bolt.fill", pal) {
                 ForEach(snap.energyProcesses) { p in
                     HStack(spacing: 5) {
@@ -1720,6 +1779,8 @@ struct Dashboard: View {
                     }
                 }
             }
+        default:
+            EmptyView()
         }
     }
 

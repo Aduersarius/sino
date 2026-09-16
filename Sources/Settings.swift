@@ -17,6 +17,57 @@ final class Prefs: ObservableObject {
         ("fans", "Fans", "fan"),
         ("battery", "Battery", "battery.100percent")
     ]
+    static let dropElements: [(id: String, title: String, icon: String)] = [
+        ("cpu", "CPU", "cpu"),
+        ("ram", "RAM", "memorychip"),
+        ("gpu", "GPU", "display"),
+        ("storage", "Storage", "internaldrive"),
+        ("net", "Network", "wifi"),
+        ("fans", "Fans", "fan"),
+        ("battery", "Battery", "battery.100percent"),
+        ("toolbar", "Toolbar", "menubar.dock.rectangle")
+    ]
+    static let sidePanels: [(id: String, title: String, icon: String)] = [
+        ("cpu", "CPU", "cpu"),
+        ("ram", "RAM", "memorychip"),
+        ("gpu", "GPU", "display"),
+        ("storage", "Storage", "internaldrive"),
+        ("net", "Network", "wifi"),
+        ("fans", "Fans", "fan"),
+        ("battery", "Battery", "battery.100percent")
+    ]
+    static let sideSections: [String: [(id: String, title: String, icon: String)]] = [
+        "cpu": [
+            ("cores", "CPU Cores", "cpu"),
+            ("procs", "CPU Usage", "square.grid.2x2"),
+            ("gpu", "GPU Summary", "display")
+        ],
+        "ram": [
+            ("memory", "Memory & Clean", "memorychip"),
+            ("procs", "Processes", "square.grid.2x2")
+        ],
+        "gpu": [
+            ("gpu", "GPU Details", "display")
+        ],
+        "storage": [
+            ("activity", "Storage Activity", "externaldrive.connected.to.line.below"),
+            ("volumes", "Volumes", "internaldrive")
+        ],
+        "net": [
+            ("chart", "Bandwidth & Chart", "wifi"),
+            ("wifi", "Wi-Fi Details", "wifi.badge.checkmark"),
+            ("addresses", "Addresses & Geo", "globe"),
+            ("topProc", "Top Process", "square.grid.2x2")
+        ],
+        "fans": [
+            ("fans", "Fan Speeds", "fan"),
+            ("sensors", "Sensors", "thermometer")
+        ],
+        "battery": [
+            ("battery", "Battery & Power", "battery.100percent"),
+            ("energy", "Energy Usage", "bolt.fill")
+        ]
+    ]
     static let frosts: [(id: String, title: String)] = [
         ("hud", "HUD"),
         ("menu", "Menu"),
@@ -40,6 +91,9 @@ final class Prefs: ObservableObject {
     @Published var bar: Set<String>
     @Published var barOrder: [String]
     @Published var drop: Set<String>
+    @Published var dropOrder: [String]
+    @Published var sideOrder: [String: [String]]
+    @Published var sideHidden: Set<String>
     @Published var toolbar: Set<String>
     @Published var toolbarOrder: [String]
     @Published var login: Bool
@@ -66,7 +120,30 @@ final class Prefs: ObservableObject {
         order = order.filter { ids.contains($0) }
         for id in ids where !order.contains(id) { order.append(id) }
         barOrder = order
-        drop = Set(d.stringArray(forKey: "sino.drop") ?? d.stringArray(forKey: "pulse.drop") ?? Prefs.modules.map(\.id))
+        let dropIds = Prefs.dropElements.map(\.id)
+        var dOrder = d.stringArray(forKey: "sino.dropOrder") ?? []
+        dOrder = dOrder.filter { dropIds.contains($0) }
+        for id in dropIds where !dOrder.contains(id) { dOrder.append(id) }
+        dropOrder = dOrder
+        var dSet = Set(d.stringArray(forKey: "sino.drop") ?? d.stringArray(forKey: "pulse.drop") ?? dropIds)
+        if d.object(forKey: "sino.dropOrder") == nil {
+            dSet.insert("toolbar")
+        }
+        drop = dSet.isEmpty ? ["cpu"] : dSet
+
+        var sOrder = (d.object(forKey: "sino.sideOrder") as? [String: [String]]) ?? [:]
+        for (k, items) in Prefs.sideSections {
+            let validIds = items.map(\.id)
+            if sOrder[k] == nil {
+                sOrder[k] = validIds
+            } else {
+                var cur = sOrder[k]!.filter { validIds.contains($0) }
+                for id in validIds where !cur.contains(id) { cur.append(id) }
+                sOrder[k] = cur
+            }
+        }
+        sideOrder = sOrder
+        sideHidden = Set(d.stringArray(forKey: "sino.sideHidden") ?? [])
         let toolIds = Prefs.toolbarButtons.map(\.id)
         toolbar = Set(d.stringArray(forKey: "sino.toolbar") ?? toolIds)
         var tOrder = d.stringArray(forKey: "sino.toolbarOrder") ?? []
@@ -128,6 +205,9 @@ final class Prefs: ObservableObject {
         d.set(Array(bar), forKey: "sino.bar")
         d.set(barOrder, forKey: "sino.barOrder")
         d.set(Array(drop), forKey: "sino.drop")
+        d.set(dropOrder, forKey: "sino.dropOrder")
+        d.set(sideOrder, forKey: "sino.sideOrder")
+        d.set(Array(sideHidden), forKey: "sino.sideHidden")
         d.set(Array(toolbar), forKey: "sino.toolbar")
         d.set(toolbarOrder, forKey: "sino.toolbarOrder")
         d.set(login, forKey: "sino.login")
@@ -184,6 +264,22 @@ final class Prefs: ObservableObject {
                 self.save()
             }
         )
+    }
+
+    func sideBind(_ panel: String, _ sectionId: String) -> Binding<Bool> {
+        let key = "\(panel):\(sectionId)"
+        return Binding(
+            get: { !self.sideHidden.contains(key) },
+            set: { on in
+                if on { self.sideHidden.remove(key) }
+                else { self.sideHidden.insert(key) }
+                self.save()
+            }
+        )
+    }
+
+    func isSideVisible(_ panel: String, _ sectionId: String) -> Bool {
+        !sideHidden.contains("\(panel):\(sectionId)")
     }
 
     var frostMaterial: NSVisualEffectView.Material {
@@ -558,7 +654,7 @@ struct SettingsRoot: View {
         switch page {
         case "appear": appearancePage
         case "bar": barPage
-        case "drop": modulesPage(bind: prefs.dropBind)
+        case "drop": dropdownPage
         case "toolbar": toolbarPage
         case "about": aboutPage
         default: generalPage
@@ -763,14 +859,20 @@ struct SettingsRoot: View {
         }
     }
 
-    func modulesPage(bind: @escaping (String) -> Binding<Bool>) -> some View {
-        SettingsGroup {
-            ForEach(Array(Prefs.modules.enumerated()), id: \.element.id) { i, m in
-                if i > 0 { Divider().padding(.leading, 14) }
-                SettingsRow(title: m.title) {
-                    Toggle("", isOn: bind(m.id)).labelsHidden().toggleStyle(.switch)
-                }
+    var dropdownPage: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Main Dropdown").font(Chrome.section)
+            SettingsGroup {
+                DropOrderTable(prefs: prefs)
+                    .frame(height: CGFloat(max(prefs.dropOrder.count, 1)) * 36)
             }
+            Text("Drag to reorder cards in the main column. Toggle switches control card visibility.")
+                .font(Chrome.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+
+            Text("Secondary Dropdown (Hover Panels)").font(Chrome.section).padding(.top, 4)
+            SideSectionsConfigView(prefs: prefs)
         }
     }
 
@@ -1034,6 +1136,145 @@ struct BarOrderTable: NSViewRepresentable {
     }
 }
 
+struct DropOrderTable: NSViewRepresentable {
+    @ObservedObject var prefs: Prefs
+
+    func makeCoordinator() -> Coord { Coord(prefs: prefs) }
+
+    func makeNSView(context: Context) -> NSTableView {
+        let tv = NSTableView()
+        tv.headerView = nil
+        tv.backgroundColor = .clear
+        tv.selectionHighlightStyle = .none
+        tv.allowsEmptySelection = true
+        tv.allowsMultipleSelection = false
+        tv.usesAlternatingRowBackgroundColors = false
+        tv.rowHeight = 36
+        tv.intercellSpacing = .zero
+        tv.style = .plain
+        tv.delegate = context.coordinator
+        tv.dataSource = context.coordinator
+        tv.registerForDraggedTypes([.string])
+        tv.draggingDestinationFeedbackStyle = .gap
+        tv.setDraggingSourceOperationMask(.move, forLocal: true)
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("d"))
+        col.resizingMask = .autoresizingMask
+        tv.addTableColumn(col)
+        tv.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        context.coordinator.table = tv
+        return tv
+    }
+
+    func updateNSView(_ tv: NSTableView, context: Context) {
+        context.coordinator.prefs = prefs
+        guard !context.coordinator.dragging else { return }
+        tv.reloadData()
+        tv.sizeLastColumnToFit()
+    }
+
+    final class Coord: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        var prefs: Prefs
+        weak var table: NSTableView?
+        var dragging = false
+        init(prefs: Prefs) { self.prefs = prefs }
+
+        func numberOfRows(in tableView: NSTableView) -> Int { prefs.dropOrder.count }
+
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            QuietRow()
+        }
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            let id = prefs.dropOrder[row]
+            let item = Prefs.dropElements.first(where: { $0.id == id })
+            let title = item?.title ?? id
+            let cell = NSTableCellView()
+
+            let grip = NSImageView()
+            grip.image = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "Reorder")
+            grip.contentTintColor = .tertiaryLabelColor
+            grip.translatesAutoresizingMaskIntoConstraints = false
+
+            let icon = NSImageView()
+            icon.image = NSImage(systemSymbolName: item?.icon ?? "square", accessibilityDescription: nil)
+            icon.contentTintColor = .secondaryLabelColor
+            icon.translatesAutoresizingMaskIntoConstraints = false
+
+            let lab = NSTextField(labelWithString: title)
+            lab.font = .systemFont(ofSize: 13)
+            lab.translatesAutoresizingMaskIntoConstraints = false
+
+            let sw = NSSwitch()
+            sw.state = prefs.drop.contains(id) ? .on : .off
+            sw.identifier = NSUserInterfaceItemIdentifier(id)
+            sw.target = self
+            sw.action = #selector(tog(_:))
+            sw.translatesAutoresizingMaskIntoConstraints = false
+
+            cell.addSubview(grip)
+            cell.addSubview(icon)
+            cell.addSubview(lab)
+            cell.addSubview(sw)
+
+            NSLayoutConstraint.activate([
+                grip.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+                grip.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                grip.widthAnchor.constraint(equalToConstant: 16),
+                grip.heightAnchor.constraint(equalToConstant: 16),
+
+                icon.leadingAnchor.constraint(equalTo: grip.trailingAnchor, constant: 10),
+                icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                icon.widthAnchor.constraint(equalToConstant: 18),
+                icon.heightAnchor.constraint(equalToConstant: 18),
+
+                lab.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+                lab.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+
+                sw.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -14),
+                sw.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                lab.trailingAnchor.constraint(lessThanOrEqualTo: sw.leadingAnchor, constant: -8)
+            ])
+            return cell
+        }
+
+        @objc func tog(_ sender: NSSwitch) {
+            let id = sender.identifier?.rawValue ?? ""
+            prefs.dropBind(id).wrappedValue = sender.state == .on
+            table?.reloadData()
+        }
+
+        func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+            let item = NSPasteboardItem()
+            item.setString("\(row)", forType: .string)
+            return item
+        }
+
+        func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+            guard dropOperation == .above else { return [] }
+            tableView.setDropRow(row, dropOperation: .above)
+            return .move
+        }
+
+        func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+            guard let s = info.draggingPasteboard.string(forType: .string), let from = Int(s) else { return false }
+            guard from != row, from + 1 != row else { return true }
+            prefs.dropOrder.move(fromOffsets: IndexSet(integer: from), toOffset: row)
+            prefs.save()
+            tableView.reloadData()
+            return true
+        }
+
+        func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
+            dragging = true
+        }
+
+        func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+            dragging = false
+            tableView.reloadData()
+        }
+    }
+}
+
 struct ToolbarOrderTable: NSViewRepresentable {
     @ObservedObject var prefs: Prefs
 
@@ -1207,6 +1448,102 @@ struct SettingsGroup<Content: View>: View {
     var body: some View {
         VStack(spacing: 0) { content }
             .background(Chrome.group(scheme == .dark), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+struct SideSectionsConfigView: View {
+    @ObservedObject var prefs: Prefs
+
+    static let panels: [(id: String, title: String, sections: [(id: String, title: String)])] = [
+        ("cpu", "CPU Hover Panel", [
+            ("cores", "CPU Cores"),
+            ("procs", "CPU Usage (Processes)"),
+            ("gpu", "GPU Mini Card")
+        ]),
+        ("ram", "RAM Hover Panel", [
+            ("memory", "Memory Stats & Quick Clean"),
+            ("procs", "RAM Processes")
+        ]),
+        ("gpu", "GPU Hover Panel", [
+            ("gpu", "GPU Device & Renderer Details")
+        ]),
+        ("storage", "Storage Hover Panel", [
+            ("activity", "Storage Activity Chart"),
+            ("volumes", "Volumes & Disk Usage")
+        ]),
+        ("net", "Network Hover Panel", [
+            ("chart", "Traffic Activity Chart"),
+            ("wifi", "Wi-Fi Details"),
+            ("addresses", "IP Addresses & Geolocation"),
+            ("topProc", "Top Bandwidth Process")
+        ]),
+        ("fans", "Fans Hover Panel", [
+            ("fans", "Fan Speeds & RPM"),
+            ("sensors", "Temperature Sensors")
+        ]),
+        ("battery", "Battery Hover Panel", [
+            ("battery", "Battery Stats & Health"),
+            ("energy", "Top Energy Processes")
+        ])
+    ]
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ForEach(Self.panels, id: \.id) { panel in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(panel.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 4)
+
+                    SettingsGroup {
+                        let order = prefs.sideOrder[panel.id] ?? panel.sections.map(\.id)
+                        ForEach(Array(order.enumerated()), id: \.element) { i, secId in
+                            if i > 0 { Divider().padding(.leading, 14) }
+                            let title = panel.sections.first(where: { $0.id == secId })?.title ?? secId
+                            SettingsRow(title: title) {
+                                HStack(spacing: 8) {
+                                    if order.count > 1 {
+                                        Button {
+                                            move(panel: panel.id, from: i, up: true)
+                                        } label: {
+                                            Image(systemName: "arrow.up")
+                                                .font(.system(size: 10, weight: .semibold))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .disabled(i == 0)
+                                        .opacity(i == 0 ? 0.3 : 0.8)
+
+                                        Button {
+                                            move(panel: panel.id, from: i, up: false)
+                                        } label: {
+                                            Image(systemName: "arrow.down")
+                                                .font(.system(size: 10, weight: .semibold))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .disabled(i == order.count - 1)
+                                        .opacity(i == order.count - 1 ? 0.3 : 0.8)
+                                    }
+
+                                    Toggle("", isOn: prefs.sideBind(panel.id, secId))
+                                        .labelsHidden()
+                                        .toggleStyle(.switch)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func move(panel: String, from index: Int, up: Bool) {
+        var list = prefs.sideOrder[panel] ?? []
+        let to = up ? index - 1 : index + 1
+        guard list.indices.contains(index), list.indices.contains(to) else { return }
+        list.swapAt(index, to)
+        prefs.sideOrder[panel] = list
+        prefs.save()
     }
 }
 
