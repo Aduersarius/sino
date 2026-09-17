@@ -172,6 +172,8 @@ final class Prefs: ObservableObject {
     @Published var preventDisplaySleep: Bool
     @Published var preventLidSleep: Bool
     @Published var animations: Bool
+    @Published var updateNotify: Bool
+    @Published var updateBanner: Bool
     @Published var hasCompletedOnboarding: Bool
     @Published var fanCurve: [FanCurvePoint]
 
@@ -240,6 +242,8 @@ final class Prefs: ObservableObject {
         preventDisplaySleep = (d.object(forKey: "sino.preventDisplaySleep") ?? d.object(forKey: "pulse.preventDisplaySleep")) as? Bool ?? true
         preventLidSleep = (d.object(forKey: "sino.preventLidSleep") ?? d.object(forKey: "pulse.preventLidSleep")) as? Bool ?? true
         animations = (d.object(forKey: "sino.animations") ?? d.object(forKey: "pulse.animations")) as? Bool ?? true
+        updateNotify = (d.object(forKey: "sino.updateNotify") ?? d.object(forKey: "pulse.updateNotify")) as? Bool ?? true
+        updateBanner = (d.object(forKey: "sino.updateBanner") ?? d.object(forKey: "pulse.updateBanner")) as? Bool ?? true
         hasCompletedOnboarding = (d.object(forKey: "sino.hasCompletedOnboarding") ?? d.object(forKey: "pulse.hasCompletedOnboarding")) as? Bool ?? false
         if let raw = d.array(forKey: "sino.fanCurve") as? [[Double]], raw.count >= 3 {
             fanCurve = raw.prefix(3).map { FanCurvePoint(temp: $0[0], rpm: $0[1]) }
@@ -304,6 +308,8 @@ final class Prefs: ObservableObject {
         d.set(preventDisplaySleep, forKey: "sino.preventDisplaySleep")
         d.set(preventLidSleep, forKey: "sino.preventLidSleep")
         d.set(animations, forKey: "sino.animations")
+        d.set(updateNotify, forKey: "sino.updateNotify")
+        d.set(updateBanner, forKey: "sino.updateBanner")
         d.set(fanCurve.map { [$0.temp, $0.rpm] }, forKey: "sino.fanCurve")
         writeSlot()
     }
@@ -476,6 +482,17 @@ final class Prefs: ObservableObject {
         save()
     }
 
+    func setUpdateNotify(_ on: Bool) {
+        updateNotify = on
+        updateBanner = on
+        save()
+    }
+
+    func setUpdateBanner(_ on: Bool) {
+        updateBanner = on
+        save()
+    }
+
     func setHasCompletedOnboarding(_ on: Bool) {
         hasCompletedOnboarding = on
         UserDefaults.standard.set(on, forKey: "sino.hasCompletedOnboarding")
@@ -609,6 +626,7 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
     @Published var downloadURL: URL?
     @Published var isUpdating = false
     @Published var updateProgress: String? = nil
+    @Published var availableVersion: String?
 
     var current: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
@@ -661,9 +679,11 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
                     self.downloadURL = URL(string: dl)
                 }
                 if latest.compare(self.current, options: .numeric) == .orderedDescending {
+                    self.availableVersion = latest
                     self.status = "\(latest) available"
-                    if notify { self.ping(latest) }
+                    if notify, Prefs.shared.updateNotify { self.ping(latest) }
                 } else {
+                    self.availableVersion = nil
                     self.status = "Up to date"
                 }
             }
@@ -1570,6 +1590,12 @@ struct SettingsRoot: View {
                         }
                     }
                 }
+                Divider().padding(.leading, 14)
+                row("Update notifications") {
+                    Toggle("", isOn: Binding(get: { prefs.updateNotify }, set: { prefs.setUpdateNotify($0) }))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
                 if updater.status != "—" && !updater.isUpdating {
                     Text(updater.status)
                         .font(Chrome.caption)
@@ -2370,7 +2396,7 @@ private struct HoverBGView: NSViewRepresentable {
         v.selected = selected
         v.hugPopup = hugPopup
         v.needsDisplay = true
-        v.updateTrackingAreas()
+        v.syncHover()
     }
 }
 
@@ -2387,9 +2413,24 @@ final class HoverBG: NSView {
         }
     }
     var selected = false { didSet { needsDisplay = true } }
-    private var hovering = false { didSet { needsDisplay = true } }
+    private var hovering = false {
+        didSet {
+            guard hovering != oldValue else { return }
+            needsDisplay = true
+            if hovering {
+                startMonitoringMouse()
+                if let tip, !tip.isEmpty {
+                    TooltipManager.shared.show(tip, for: self)
+                }
+            } else {
+                stopMonitoringMouse()
+                TooltipManager.shared.hide(for: self)
+            }
+        }
+    }
     private var tracking = false
     private var pressed = false { didSet { needsDisplay = true } }
+    private var mouseMonitor: Any?
     override var isOpaque: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -2401,11 +2442,12 @@ final class HoverBG: NSView {
     }
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil {
-            TooltipManager.shared.hide(for: self)
+            hovering = false
         }
         super.viewWillMove(toWindow: newWindow)
     }
     deinit {
+        stopMonitoringMouse()
         TooltipManager.shared.hideImmediately()
     }
     override func layout() {
@@ -2413,23 +2455,56 @@ final class HoverBG: NSView {
         updateTrackingAreas()
     }
     override func updateTrackingAreas() {
+        super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(
-            rect: targetRect(),
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect, .assumeInside],
             owner: self,
             userInfo: nil
         ))
+        syncHover()
     }
     override func mouseEntered(with event: NSEvent) {
-        hovering = true
-        if let tip, !tip.isEmpty {
-            TooltipManager.shared.show(tip, for: self)
-        }
+        syncHover(event)
     }
     override func mouseExited(with event: NSEvent) {
         hovering = false
-        TooltipManager.shared.hide(for: self)
+    }
+    override func mouseMoved(with event: NSEvent) {
+        syncHover(event)
+    }
+    func syncHover(_ event: NSEvent? = nil) {
+        guard let w = window, w.isVisible else {
+            if hovering { hovering = false }
+            return
+        }
+        let p: NSPoint
+        if let event, event.window == w {
+            p = convert(event.locationInWindow, from: nil)
+        } else {
+            let screenPt = NSEvent.mouseLocation
+            let winPt = w.convertPoint(fromScreen: screenPt)
+            p = convert(winPt, from: nil)
+        }
+        let inside = targetRect().contains(p)
+        if hovering != inside {
+            hovering = inside
+        }
+    }
+    private func startMonitoringMouse() {
+        guard mouseMonitor == nil else { return }
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
+            guard let self else { return event }
+            self.syncHover(event)
+            return event
+        }
+    }
+    private func stopMonitoringMouse() {
+        if let m = mouseMonitor {
+            NSEvent.removeMonitor(m)
+            mouseMonitor = nil
+        }
     }
     override func mouseDown(with event: NSEvent) {
         TooltipManager.shared.hideImmediately()
@@ -2451,6 +2526,7 @@ final class HoverBG: NSView {
             tracking = false
             pressed = false
             if go { onClick() }
+            syncHover()
             return
         }
         guard captureHits else { return }

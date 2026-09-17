@@ -38,6 +38,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var panel: Panel?
     @Published var cleaningRAM = false
     @Published var cleanFeedback: String? = nil
+    @Published var lowPowerMode = false
+    @Published var lpmBusy = false
     @Published var fetchingIP = false
     @Published var confirmingKillPid: pid_t? = nil
     var activeKillButton: NSView?
@@ -78,6 +80,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyTheme()
         lastDark = currentScheme == .dark
+        refreshLowPowerMode()
+        NotificationCenter.default.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
+            self?.refreshLowPowerMode()
+        }
         if let idx = CommandLine.arguments.firstIndex(of: "--render-settings-png"), idx + 1 < CommandLine.arguments.count {
             let out = CommandLine.arguments[idx + 1]
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
@@ -128,19 +134,6 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             DispatchQueue.global(qos: .utility).async {
                 PMSetHelper.setSleepDisabled(false)
             }
-        }
-        // ponytail: auto-dismiss drop on space/desktop change or app switching/deactivation
-        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.hideDrop()
-        }
-        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.hideDrop()
-        }
-        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didDeactivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.hideDrop()
-        }
-        NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.hideDrop()
         }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let button = item.button else { return }
@@ -255,7 +248,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         if abs(extra.frame.width - w) > 0.5 || abs(extra.frame.height - h) > 0.5 {
             extra.frame = NSRect(origin: .zero, size: NSSize(width: w, height: h))
         }
-        let len = w + 4
+        let len = w
         if abs(item.length - len) > 0.5 {
             item.length = len
         }
@@ -444,20 +437,11 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
         let next = NSRect(x: x, y: y, width: w, height: h)
         let f = detail.frame
-        let needsResize = abs(f.minX - next.minX) > 0.5 || abs(f.minY - next.minY) > 0.5
-            || abs(f.width - next.width) > 1 || abs(f.height - next.height) > 2
-        if !detail.isVisible {
+        if abs(f.minX - next.minX) > 0.5 || abs(f.minY - next.minY) > 0.5
+            || abs(f.width - next.width) > 1 || abs(f.height - next.height) > 2 {
             detail.setFrame(next, display: true)
-            detail.orderFrontRegardless()
-        } else if needsResize {
-            // ponytail: snappy frame resize animation synchronized with content transition
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.11
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                ctx.allowsImplicitAnimation = true
-                detail.animator().setFrame(next, display: true)
-            }
         }
+        if !detail.isVisible { detail.orderFrontRegardless() }
         for c in catchers { detail.order(.above, relativeTo: c.windowNumber) }
         armTrack(detail)
     }
@@ -681,20 +665,29 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     func selectSettingsPage(_ page: String) {
         settingsPage = page
-        if page == "appear" || page == "drop" {
-            showDrop()
-        } else {
-            hideDrop()
+    }
+
+    func pinHudAboveSettings(_ on: Bool) {
+        let lv: NSWindow.Level = on ? .popUpMenu : .statusBar
+        drop?.level = lv
+        detail?.level = lv
+        if on, dropOpen {
+            drop.orderFrontRegardless()
+            if detail.isVisible { detail.orderFrontRegardless() }
+            settingsWC?.window?.makeKey()
+            drop.orderFrontRegardless()
+            if detail.isVisible { detail.orderFrontRegardless() }
         }
     }
 
     func setPanel(_ v: Panel?) {
+        hidePanel?.cancel()
         hidePanel = nil
         if let v {
             let changed = panel != v
             panel = v
             if changed || detail?.isVisible != true {
-                showDetail()
+                DispatchQueue.main.async { self.showDetail() }
             }
             return
         }
@@ -745,16 +738,39 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    func refreshLowPowerMode() {
+        lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled || PMSetHelper.isLowPowerMode
+    }
+
+    func toggleLowPowerMode() {
+        guard !lpmBusy else { return }
+        lpmBusy = true
+        let next = !lowPowerMode
+        lowPowerMode = next
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ok = PMSetHelper.setLowPowerMode(next)
+            DispatchQueue.main.async {
+                self?.lpmBusy = false
+                self?.refreshLowPowerMode()
+                if !ok { self?.lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled }
+            }
+        }
+    }
+
     func showDrop() {
         guard !dropOpen else { return }
         ignoreClicksUntil = Date().addingTimeInterval(0.1)
         dropOpen = true
+        refreshLowPowerMode()
         sampler.runHeavy()
         objectWillChange.send()
         refreshMenu()
         sizePopover()
         drop.orderFrontRegardless()
         startClickMon()
+        if settingsWC?.window?.isVisible == true {
+            pinHudAboveSettings(true)
+        }
     }
 
     @objc func toggle() {
@@ -767,6 +783,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     func hideDrop() {
         guard drop != nil else { return }
+        pinHudAboveSettings(false)
         TooltipManager.shared.hideImmediately()
         hideDetail()
         drop.orderOut(nil)
@@ -783,6 +800,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         clickMon = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
             self?.closeIfOutside()
         }
+        let settingsUp = settingsWC?.window?.isVisible == true
+        if !settingsUp {
         // ponytail: span catcher across all screens so multi-monitor clicks dismiss reliably even with separate spaces
         let screens = NSScreen.screens.isEmpty ? [(item.button?.window?.screen ?? NSScreen.main)].compactMap { $0 } : NSScreen.screens
         catchers = screens.map { s in
@@ -798,6 +817,13 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             let v = CatcherView(frame: NSRect(origin: .zero, size: s.frame.size))
             v.autoresizingMask = [.width, .height]
             v.onDown = { [weak self] in self?.closeIfOutside() }
+            v.shouldPassThrough = { [weak self] pt in
+                guard let self else { return false }
+                if let sw = self.settingsWC?.window, sw.isVisible, sw.frame.contains(pt) {
+                    return true
+                }
+                return false
+            }
             p.contentView = v
             p.setFrame(s.frame, display: false)
             p.orderFrontRegardless()
@@ -807,6 +833,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         for c in catchers {
             drop.order(.above, relativeTo: c.windowNumber)
             if detail.isVisible { detail.order(.above, relativeTo: c.windowNumber) }
+        }
         }
         startHoverMon()
         dropClickMon = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] e in
@@ -869,7 +896,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func pickHover() {
         guard dropOpen else { return }
         let loc = NSEvent.mouseLocation
-        if detail.isVisible, detail.frame.contains(loc) {
+        if detail.isVisible, detail.frame.insetBy(dx: -8, dy: -4).contains(loc) {
             if let panel { setPanel(panel) }
             return
         }
@@ -900,12 +927,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             let br = w.convertToScreen(button.convert(button.bounds, to: nil))
             if br.contains(loc) { return }
         }
-        if let sw = settingsWC?.window, sw.isVisible, sw.frame.contains(loc) {
-            // Keep drop open only if settings is on appearance or dropdown tab
-            if settingsPage == "appear" || settingsPage == "drop" {
-                return
-            }
-        }
+        if let sw = settingsWC?.window, sw.isVisible, sw.frame.contains(loc) { return }
         if let ow = onboardingWC?.window, ow.isVisible, ow.frame.contains(loc) { return }
         hideDrop()
     }
@@ -936,10 +958,7 @@ final class SettingsWindow: NSWindow {
 }
 
     func openSettings() {
-        let keepDrop = settingsPage == "appear" || settingsPage == "drop"
-        if !keepDrop {
-            hideDrop()
-        }
+        hideDrop()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         if settingsWC == nil {
@@ -959,6 +978,7 @@ final class SettingsWindow: NSWindow {
             w.center()
             settingsWC = NSWindowController(window: w)
             NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
+                self?.hideDrop()
                 self?.settingsWC = nil
                 if self?.onboardingWC == nil {
                     NSApp.setActivationPolicy(.accessory)
@@ -968,11 +988,6 @@ final class SettingsWindow: NSWindow {
         settingsWC?.showWindow(nil)
         settingsWC?.window?.makeKeyAndOrderFront(nil)
         settingsWC?.window?.orderFrontRegardless()
-        if keepDrop {
-            DispatchQueue.main.async { [weak self] in
-                self?.showDrop()
-            }
-        }
     }
 
     func openOnboarding() {
@@ -1045,13 +1060,21 @@ final class HotKeyManager {
 }
 
 final class DropPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
 }
 
 final class CatcherView: NSView {
     var onDown: (() -> Void)?
+    var shouldPassThrough: ((NSPoint) -> Bool)?
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { self }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let screenPoint = window?.convertPoint(toScreen: point) ?? point
+        if let shouldPassThrough, shouldPassThrough(screenPoint) {
+            return nil
+        }
+        return self
+    }
     override func draw(_ dirtyRect: NSRect) {
         NSColor.black.withAlphaComponent(1.0 / 255.0).setFill()
         bounds.fill()
@@ -1077,7 +1100,7 @@ final class ExtraView: NSView {
     override var isFlipped: Bool { true }
 
     func makeImage() -> NSImage {
-        let size = bounds.size.width > 0 ? bounds.size : NSSize(width: fittingWidth, height: 22)
+        let size = NSSize(width: fittingWidth, height: max(bounds.height, 22))
         return NSImage(size: size, flipped: true) { rect in
             NSColor.clear.set()
             rect.fill(using: .copy)
@@ -1125,23 +1148,21 @@ final class ExtraView: NSView {
     }
 
     var fittingWidth: CGFloat {
-        guard !chips.isEmpty else { return 48 }
-        return chips.map(chipWidth).reduce(0, +) + CGFloat(chips.count - 1) * gap + 16
+        guard !chips.isEmpty else { return 40 }
+        return chips.map(chipWidth).reduce(0, +) + CGFloat(chips.count - 1) * gap + 4
     }
 
     override func draw(_ dirtyRect: NSRect) {
         if flashAlpha > 0, let color = flashColor {
-            // Expanded rounded capsule highlight prolonged to the left
-            let selRect = NSRect(x: 0, y: 0.5, width: bounds.width - 2, height: bounds.height - 1)
-            let rad = min(selRect.width, selRect.height) / 2
-            let path = NSBezierPath(roundedRect: selRect, xRadius: rad, yRadius: rad)
+            let selRect = NSRect(x: 0, y: 0.5, width: bounds.width, height: bounds.height - 1)
+            let path = NSBezierPath(roundedRect: selRect, xRadius: 4, yRadius: 4)
             color.withAlphaComponent(flashAlpha * 0.45).setFill()
             path.fill()
         }
 
         let labelH: CGFloat = 9
         let opts: NSString.DrawingOptions = [.usesLineFragmentOrigin]
-        var x: CGFloat = 8
+        var x: CGFloat = 2
         for c in chips {
             let cw = chipWidth(c)
             if let frac = c.batteryFrac {
@@ -1409,7 +1430,7 @@ struct HoverPad: NSViewRepresentable {
         v.onClick = onClick
         v.tip = tip
         v.needsDisplay = true
-        v.updateTrackingAreas()
+        v.syncHover()
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: HoverBG, context: Context) -> CGSize {
         proposal.replacingUnspecifiedDimensions()
@@ -1498,6 +1519,7 @@ final class FrameProbe: NSView {
 struct Dashboard: View {
     @ObservedObject var app: App
     @ObservedObject var prefs = Prefs.shared
+    @ObservedObject var updater = Updater.shared
     var mode: Kind = .main
     enum Kind { case main, detail }
     var snap: Snapshot { app.sampler.snap }
@@ -1530,12 +1552,15 @@ struct Dashboard: View {
     var mainColumn: some View {
         VStack(spacing: 4) {
             ForEach(app.prefs.dropOrder, id: \.self) { id in
-                if shown(id) {
-                    if id == "toolbar" {
-                        toolbar
-                    } else {
-                        mainCard(for: id)
+                if id == "toolbar" {
+                    if prefs.updateBanner, let ver = updater.availableVersion {
+                        updateBanner(ver)
                     }
+                    if shown(id) {
+                        toolbar
+                    }
+                } else if shown(id) {
+                    mainCard(for: id)
                 }
             }
         }
@@ -1680,6 +1705,26 @@ struct Dashboard: View {
                         Spacer()
                         Text(watts(snap.systemLoadW)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
                     }
+                }
+            } headerTrailing: {
+                let on = app.lowPowerMode
+                HStack(spacing: 3) {
+                    Image(systemName: on ? "leaf.fill" : "leaf")
+                        .font(.system(size: 8.5, weight: .semibold))
+                    Text("Low Power")
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(on ? pal.accent : .secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(on ? pal.accent.opacity(0.18) : pal.track.opacity(0.8), in: Capsule())
+                .overlay {
+                    HoverPad(
+                        tip: on ? "Turn off Low Power Mode" : "Turn on Low Power Mode",
+                        captureHits: true,
+                        onClick: { app.toggleLowPowerMode() },
+                        radius: 12
+                    )
                 }
             }
         default:
@@ -2351,6 +2396,26 @@ struct Dashboard: View {
                     .frame(height: 92)
                     .padding(.top, 2)
                 }
+            } headerTrailing: {
+                let on = app.lowPowerMode
+                HStack(spacing: 3) {
+                    Image(systemName: on ? "leaf.fill" : "leaf")
+                        .font(.system(size: 8.5, weight: .semibold))
+                    Text("Low Power")
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(on ? pal.accent : .secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(on ? pal.accent.opacity(0.18) : pal.track.opacity(0.8), in: Capsule())
+                .overlay {
+                    HoverPad(
+                        tip: on ? "Turn off Low Power Mode" : "Turn on Low Power Mode",
+                        captureHits: true,
+                        onClick: { app.toggleLowPowerMode() },
+                        radius: 12
+                    )
+                }
             }
         case "energy":
             Card("ENERGY", "bolt.fill", pal) {
@@ -2376,6 +2441,35 @@ struct Dashboard: View {
         default:
             EmptyView()
         }
+    }
+
+    func updateBanner(_ ver: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(pal.accent)
+            Text("\(ver) available")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 4)
+            Text(updater.isUpdating ? (updater.updateProgress ?? "Updating…") : "Update")
+                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                .foregroundStyle(updater.isUpdating ? .secondary : pal.accent)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(pal.accent.opacity(updater.isUpdating ? 0.08 : 0.16), in: Capsule())
+                .overlay {
+                    if !updater.isUpdating {
+                        HoverPad(tip: "Download and install \(ver)", captureHits: true, onClick: {
+                            updater.performUpdate()
+                        }, radius: 10)
+                    }
+                }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(pal.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     var toolbar: some View {
@@ -3686,6 +3780,7 @@ enum FanCtl {
 
 enum PMSetHelper {
     static let sudoersFile = "/private/etc/sudoers.d/sino_awake"
+    static let sudoersBody = "Cmnd_Alias SINO_PMSET = /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a lowpowermode 1, /usr/bin/pmset -a lowpowermode 0\n%admin ALL=(ALL) NOPASSWD: SINO_PMSET\n"
 
     static var isSudoersInstalled: Bool {
         FileManager.default.fileExists(atPath: sudoersFile)
@@ -3694,28 +3789,32 @@ enum PMSetHelper {
     @discardableResult
     static func installSudoers() -> Bool {
         if isSudoersInstalled { return true }
-        let cmd = "printf '%s\\n%s\\n' 'Cmnd_Alias SINO_PMSET = /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0' '%admin ALL=(ALL) NOPASSWD: SINO_PMSET' > \(sudoersFile) && chmod 0440 \(sudoersFile)"
+        let cmd = "printf '%s' '\(sudoersBody)' > \(sudoersFile) && chmod 0440 \(sudoersFile)"
         return runPrivileged(cmd)
     }
 
-    static var isSleepDisabled: Bool {
+    static var isSleepDisabled: Bool { pmsetFlag("SleepDisabled") }
+    static var isLowPowerMode: Bool {
+        ProcessInfo.processInfo.isLowPowerModeEnabled || pmsetFlag("lowpowermode")
+    }
+
+    private static func pmsetFlag(_ key: String) -> Bool {
         let pipe = Pipe()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
         proc.arguments = ["-g"]
         proc.standardOutput = pipe
+        proc.standardError = Pipe()
         do {
             try proc.run()
             proc.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let str = String(data: data, encoding: .utf8) else { return false }
             for line in str.components(separatedBy: .newlines) {
-                if line.contains("SleepDisabled") {
-                    let parts = line.split(whereSeparator: { $0.isWhitespace })
-                    if parts.count >= 2, parts[1] == "1" {
-                        return true
-                    }
-                }
+                let t = line.trimmingCharacters(in: .whitespaces)
+                guard t.lowercased().hasPrefix(key.lowercased()) else { continue }
+                let parts = t.split(whereSeparator: { $0.isWhitespace })
+                if parts.count >= 2, parts[1] == "1" { return true }
             }
         } catch {}
         return false
@@ -3723,30 +3822,29 @@ enum PMSetHelper {
 
     @discardableResult
     static func setSleepDisabled(_ disable: Bool) -> Bool {
-        let current = isSleepDisabled
-        if disable == current { return true }
+        setPmset("disablesleep", disable)
+    }
 
-        let val = disable ? "1" : "0"
+    @discardableResult
+    static func setLowPowerMode(_ on: Bool) -> Bool {
+        setPmset("lowpowermode", on)
+    }
 
-        // 1. Try passwordless sudo first
+    @discardableResult
+    private static func setPmset(_ key: String, _ on: Bool) -> Bool {
+        let val = on ? "1" : "0"
         let sudoProc = Process()
         sudoProc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        sudoProc.arguments = ["-n", "/usr/bin/pmset", "-a", "disablesleep", val]
+        sudoProc.arguments = ["-n", "/usr/bin/pmset", "-a", key, val]
+        sudoProc.standardOutput = Pipe()
+        sudoProc.standardError = Pipe()
         do {
             try sudoProc.run()
             sudoProc.waitUntilExit()
-            if sudoProc.terminationStatus == 0 {
-                return true
-            }
+            if sudoProc.terminationStatus == 0 { return true }
         } catch {}
-
-        // 2. If passwordless sudo failed, run with admin privileges
-        if disable {
-            let cmd = "printf '%s\\n%s\\n' 'Cmnd_Alias SINO_PMSET = /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0' '%admin ALL=(ALL) NOPASSWD: SINO_PMSET' > \(sudoersFile) && chmod 0440 \(sudoersFile) && /usr/bin/pmset -a disablesleep 1"
-            return runPrivileged(cmd)
-        } else {
-            return runPrivileged("/usr/bin/pmset -a disablesleep 0")
-        }
+        let cmd = "printf '%s' '\(sudoersBody)' > \(sudoersFile) && chmod 0440 \(sudoersFile) && /usr/bin/pmset -a \(key) \(val)"
+        return runPrivileged(cmd)
     }
 
     private static func runPrivileged(_ command: String) -> Bool {
