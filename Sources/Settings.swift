@@ -1,10 +1,68 @@
 import AppKit
 import Carbon
 import Combine
+import CoreLocation
 import ServiceManagement
 import SwiftUI
 import UniformTypeIdentifiers
 import UserNotifications
+
+struct FanCurvePoint: Equatable {
+    var temp: Double
+    var rpm: Double
+}
+
+enum FanMode: String, Hashable {
+    case auto, manual, curve
+}
+
+enum FanCurves {
+    static func silent(min: Double, max: Double) -> [FanCurvePoint] {
+        [FanCurvePoint(temp: 40, rpm: min), FanCurvePoint(temp: 82, rpm: min), FanCurvePoint(temp: 98, rpm: min + (max - min) * 0.4)]
+    }
+    static func balanced(min: Double, max: Double) -> [FanCurvePoint] {
+        [FanCurvePoint(temp: 55, rpm: min), FanCurvePoint(temp: 78, rpm: min + (max - min) * 0.45), FanCurvePoint(temp: 96, rpm: max)]
+    }
+    static func full(min: Double, max: Double) -> [FanCurvePoint] {
+        [FanCurvePoint(temp: 30, rpm: max), FanCurvePoint(temp: 60, rpm: max), FanCurvePoint(temp: 100, rpm: max)]
+    }
+    static func rpm(_ temp: Double, _ points: [FanCurvePoint]) -> Double {
+        let p = points.sorted { $0.temp < $1.temp }
+        guard let first = p.first, let last = p.last else { return 2317 }
+        if temp <= first.temp { return first.rpm }
+        if temp >= last.temp { return last.rpm }
+        if p.count == 1 { return first.rpm }
+        var m = [Double](repeating: 0, count: p.count)
+        for i in 0..<p.count {
+            if i == 0 {
+                let dt = p[1].temp - p[0].temp
+                m[i] = dt > 0.01 ? (p[1].rpm - p[0].rpm) / dt : 0
+            } else if i == p.count - 1 {
+                let dt = p[i].temp - p[i - 1].temp
+                m[i] = dt > 0.01 ? (p[i].rpm - p[i - 1].rpm) / dt : 0
+            } else {
+                let dt = p[i + 1].temp - p[i - 1].temp
+                m[i] = dt > 0.01 ? (p[i + 1].rpm - p[i - 1].rpm) / dt : 0
+            }
+        }
+        for i in 0..<(p.count - 1) {
+            let a = p[i], b = p[i + 1]
+            if temp <= b.temp {
+                let dt = max(0.01, b.temp - a.temp)
+                let u = (temp - a.temp) / dt
+                let u2 = u * u
+                let u3 = u2 * u
+                let v = (2 * u3 - 3 * u2 + 1) * a.rpm
+                    + (u3 - 2 * u2 + u) * dt * m[i]
+                    + (-2 * u3 + 3 * u2) * b.rpm
+                    + (u3 - u2) * dt * m[i + 1]
+                let lo = min(a.rpm, b.rpm), hi = max(a.rpm, b.rpm)
+                return max(lo, min(hi, v))
+            }
+        }
+        return last.rpm
+    }
+}
 
 final class Prefs: ObservableObject {
     static let shared = Prefs()
@@ -13,7 +71,7 @@ final class Prefs: ObservableObject {
         ("ram", "RAM", "memorychip"),
         ("gpu", "GPU", "display"),
         ("storage", "Storage", "internaldrive"),
-        ("net", "Network", "wifi"),
+        ("net", "Network", "network"),
         ("fans", "Fans", "fan"),
         ("battery", "Battery", "battery.100percent")
     ]
@@ -22,7 +80,7 @@ final class Prefs: ObservableObject {
         ("ram", "RAM", "memorychip"),
         ("gpu", "GPU", "display"),
         ("storage", "Storage", "internaldrive"),
-        ("net", "Network", "wifi"),
+        ("net", "Network", "network"),
         ("fans", "Fans", "fan"),
         ("battery", "Battery", "battery.100percent"),
         ("toolbar", "Toolbar", "menubar.dock.rectangle")
@@ -32,7 +90,7 @@ final class Prefs: ObservableObject {
         ("ram", "RAM", "memorychip"),
         ("gpu", "GPU", "display"),
         ("storage", "Storage", "internaldrive"),
-        ("net", "Network", "wifi"),
+        ("net", "Network", "network"),
         ("fans", "Fans", "fan"),
         ("battery", "Battery", "battery.100percent")
     ]
@@ -54,8 +112,8 @@ final class Prefs: ObservableObject {
             ("volumes", "Volumes", "internaldrive")
         ],
         "net": [
-            ("chart", "Bandwidth & Chart", "wifi"),
-            ("wifi", "Wi-Fi Details", "wifi.badge.checkmark"),
+            ("chart", "Bandwidth & Chart", "network"),
+            ("wifi", "Wi-Fi Details", "wifi"),
             ("addresses", "Addresses & Geo", "globe"),
             ("topProc", "Top Process", "square.grid.2x2")
         ],
@@ -105,13 +163,23 @@ final class Prefs: ObservableObject {
     @Published var customApp: String
     @Published var customApp2: String
     @Published var customApp3: String
+    @Published var cpuProcMode: String // "total" (0-100%) or "perCore" (100% per core)
+    @Published var cpuProcCount: Int
     @Published var ramProcCount: Int
     @Published var awakeShortcutKeyCode: Int
     @Published var awakeShortcutModifiers: UInt
+    @Published var rightClickAwake: Bool
+    @Published var preventDisplaySleep: Bool
+    @Published var preventLidSleep: Bool
+    @Published var animations: Bool
+    @Published var hasCompletedOnboarding: Bool
+    @Published var fanCurve: [FanCurvePoint]
 
     private init() {
         let d = UserDefaults.standard
         interval = (d.object(forKey: "sino.interval") ?? d.object(forKey: "pulse.interval")) as? Double ?? 1
+        cpuProcMode = d.string(forKey: "sino.cpuProcMode") ?? d.string(forKey: "pulse.cpuProcMode") ?? "total"
+        cpuProcCount = (d.object(forKey: "sino.cpuProcCount") ?? d.object(forKey: "pulse.cpuProcCount")) as? Int ?? 5
         ramProcCount = (d.object(forKey: "sino.ramProcCount") ?? d.object(forKey: "pulse.ramProcCount")) as? Int ?? 10
         awakeShortcutKeyCode = (d.object(forKey: "sino.awakeShortcutKeyCode") ?? d.object(forKey: "pulse.awakeShortcutKeyCode")) as? Int ?? kVK_ANSI_A
         awakeShortcutModifiers = (d.object(forKey: "sino.awakeShortcutModifiers") ?? d.object(forKey: "pulse.awakeShortcutModifiers")) as? UInt ?? UInt(controlKey | optionKey)
@@ -168,6 +236,16 @@ final class Prefs: ObservableObject {
         customApp = d.string(forKey: "sino.customApp") ?? d.string(forKey: "pulse.customApp") ?? ""
         customApp2 = d.string(forKey: "sino.customApp2") ?? d.string(forKey: "pulse.customApp2") ?? ""
         customApp3 = d.string(forKey: "sino.customApp3") ?? d.string(forKey: "pulse.customApp3") ?? ""
+        rightClickAwake = (d.object(forKey: "sino.rightClickAwake") ?? d.object(forKey: "pulse.rightClickAwake")) as? Bool ?? false
+        preventDisplaySleep = (d.object(forKey: "sino.preventDisplaySleep") ?? d.object(forKey: "pulse.preventDisplaySleep")) as? Bool ?? true
+        preventLidSleep = (d.object(forKey: "sino.preventLidSleep") ?? d.object(forKey: "pulse.preventLidSleep")) as? Bool ?? true
+        animations = (d.object(forKey: "sino.animations") ?? d.object(forKey: "pulse.animations")) as? Bool ?? true
+        hasCompletedOnboarding = (d.object(forKey: "sino.hasCompletedOnboarding") ?? d.object(forKey: "pulse.hasCompletedOnboarding")) as? Bool ?? false
+        if let raw = d.array(forKey: "sino.fanCurve") as? [[Double]], raw.count >= 3 {
+            fanCurve = raw.prefix(3).map { FanCurvePoint(temp: $0[0], rpm: $0[1]) }
+        } else {
+            fanCurve = FanCurves.balanced(min: 2317, max: 6800)
+        }
         if bar.isEmpty { bar = ["ram", "cpu"] }
         if drop.isEmpty { drop = ["cpu"] }
         if d.object(forKey: "sino.frost.light") == nil && d.object(forKey: "pulse.frost.light") == nil { writeSlot(false) }
@@ -219,8 +297,35 @@ final class Prefs: ObservableObject {
         d.set(customApp, forKey: "sino.customApp")
         d.set(customApp2, forKey: "sino.customApp2")
         d.set(customApp3, forKey: "sino.customApp3")
+        d.set(cpuProcMode, forKey: "sino.cpuProcMode")
+        d.set(cpuProcCount, forKey: "sino.cpuProcCount")
         d.set(ramProcCount, forKey: "sino.ramProcCount")
+        d.set(rightClickAwake, forKey: "sino.rightClickAwake")
+        d.set(preventDisplaySleep, forKey: "sino.preventDisplaySleep")
+        d.set(preventLidSleep, forKey: "sino.preventLidSleep")
+        d.set(animations, forKey: "sino.animations")
+        d.set(fanCurve.map { [$0.temp, $0.rpm] }, forKey: "sino.fanCurve")
         writeSlot()
+    }
+
+    func setCurvePoint(_ i: Int, temp: Double? = nil, rpm: Double? = nil) {
+        guard fanCurve.indices.contains(i) else { return }
+        var pts = fanCurve
+        if let temp { pts[i].temp = min(105, max(30, temp)) }
+        if let rpm { pts[i].rpm = rpm }
+        fanCurve = pts
+        save()
+        App.shared.reassertFans()
+    }
+
+    func applyFanPreset(_ id: String, minRPM: Double, maxRPM: Double) {
+        switch id {
+        case "silent": fanCurve = FanCurves.silent(min: minRPM, max: maxRPM)
+        case "full": fanCurve = FanCurves.full(min: minRPM, max: maxRPM)
+        default: fanCurve = FanCurves.balanced(min: minRPM, max: maxRPM)
+        }
+        save()
+        App.shared.setFanMode(.curve)
     }
 
     func barBind(_ id: String) -> Binding<Bool> {
@@ -327,6 +432,16 @@ final class Prefs: ObservableObject {
         App.shared.sampler.setInterval(interval)
     }
 
+    func setCpuProcMode(_ m: String) {
+        cpuProcMode = m
+        save()
+    }
+
+    func setCpuProcCount(_ v: Int) {
+        cpuProcCount = max(3, min(30, v))
+        save()
+    }
+
     func setRamProcCount(_ v: Int) {
         ramProcCount = max(3, min(30, v))
         save()
@@ -339,6 +454,31 @@ final class Prefs: ObservableObject {
         d.set(keyCode, forKey: "sino.awakeShortcutKeyCode")
         d.set(modifiers, forKey: "sino.awakeShortcutModifiers")
         HotKeyManager.shared.update(keyCode: keyCode, modifiers: modifiers)
+    }
+
+    func setRightClickAwake(_ on: Bool) {
+        rightClickAwake = on
+        save()
+    }
+
+    func setPreventDisplaySleep(_ on: Bool) {
+        preventDisplaySleep = on
+        save()
+    }
+
+    func setPreventLidSleep(_ on: Bool) {
+        preventLidSleep = on
+        save()
+    }
+
+    func setAnimations(_ on: Bool) {
+        animations = on
+        save()
+    }
+
+    func setHasCompletedOnboarding(_ on: Bool) {
+        hasCompletedOnboarding = on
+        UserDefaults.standard.set(on, forKey: "sino.hasCompletedOnboarding")
     }
 
     func setLogin(_ on: Bool) {
@@ -361,13 +501,17 @@ final class Prefs: ObservableObject {
         App.shared.applyStroke()
     }
 
+    func customAppPath(slot: Int = 1) -> String {
+        slot == 3 ? customApp3 : (slot == 2 ? customApp2 : customApp)
+    }
+
     func customAppName(slot: Int = 1) -> String {
-        let path = slot == 3 ? customApp3 : (slot == 2 ? customApp2 : customApp)
+        let path = customAppPath(slot: slot)
         return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
     }
 
     func customAppIcon(slot: Int = 1) -> NSImage? {
-        let path = slot == 3 ? customApp3 : (slot == 2 ? customApp2 : customApp)
+        let path = customAppPath(slot: slot)
         guard !path.isEmpty else { return nil }
         let raw = NSWorkspace.shared.icon(forFile: path)
         if let best = raw.representations.max(by: { $0.pixelsWide < $1.pixelsWide }), best.pixelsWide >= 64 {
@@ -427,25 +571,34 @@ final class Prefs: ObservableObject {
 
 enum Chrome {
     static func window(_ dark: Bool) -> Color {
-        dark ? Color(red: 0.110, green: 0.110, blue: 0.118) : Color(red: 0.95, green: 0.95, blue: 0.97)
+        dark ? Color(red: 0.118, green: 0.118, blue: 0.118) : Color(red: 0.95, green: 0.95, blue: 0.97)
     }
     static func sidebar(_ dark: Bool) -> Color {
-        dark ? Color(red: 0.145, green: 0.145, blue: 0.153) : Color(red: 0.93, green: 0.93, blue: 0.95)
+        dark ? Color(red: 0.133, green: 0.133, blue: 0.133) : Color(red: 0.98, green: 0.98, blue: 0.99)
+    }
+    static func sidebarBorder(_ dark: Bool) -> Color {
+        dark ? Color.white.opacity(0.14) : Color.black.opacity(0.08)
     }
     static func group(_ dark: Bool) -> Color {
-        dark ? Color(red: 0.173, green: 0.173, blue: 0.180) : Color.white.opacity(0.78)
+        dark ? Color(red: 0.145, green: 0.145, blue: 0.145) : Color.white
+    }
+    static func cardBorder(_ dark: Bool) -> Color {
+        dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
     }
     static func selected(_ dark: Bool) -> Color {
-        dark ? Color.white.opacity(0.10) : Color.black.opacity(0.07)
+        dark ? Color(red: 0.23, green: 0.23, blue: 0.23) : Color.black.opacity(0.07)
     }
     static func badge(_ dark: Bool) -> Color {
+        dark ? Color(red: 0.18, green: 0.18, blue: 0.19) : Color.black.opacity(0.06)
+    }
+    static func badgeBorder(_ dark: Bool) -> Color {
         dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
     }
     static let text: Font = .system(size: 13)
-    static let title: Font = .system(size: 16, weight: .semibold)
+    static let title: Font = .system(size: 18, weight: .bold)
     static let section: Font = .system(size: 13, weight: .semibold)
     static let caption: Font = .system(size: 11)
-    static let rail: CGFloat = 176
+    static let rail: CGFloat = 180
 } 
 
 final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
@@ -616,38 +769,288 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
     }
 }
 
+final class FanCurveView: NSView {
+    var points: [FanCurvePoint] = []
+    var rpmLo = 2317.0
+    var rpmHi = 6800.0
+    var nowTemp = 0.0
+    var nowRPM = 0.0
+    var dark = true
+    var onChange: ((Int, Double, Double) -> Void)?
+    private var drag: Int?
+    private var dragTemp = 0.0
+    private var dragRPM = 0.0
+    private let tLo = 30.0, tHi = 105.0
+    private let padL: CGFloat = 46, padR: CGFloat = 10, padT: CGFloat = 16, padB: CGFloat = 26
+
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var isOpaque: Bool { false }
+
+    private var plot: NSRect {
+        NSRect(x: padL, y: padT, width: max(8, bounds.width - padL - padR), height: max(8, bounds.height - padT - padB))
+    }
+
+    private func pos(_ p: FanCurvePoint) -> NSPoint {
+        let r = plot
+        let x = r.minX + CGFloat((p.temp - tLo) / (tHi - tLo)) * r.width
+        let u = (p.rpm - rpmLo) / max(1, rpmHi - rpmLo)
+        return NSPoint(x: x, y: r.maxY - CGFloat(min(1, max(0, u))) * r.height)
+    }
+
+    private func values(_ loc: NSPoint) -> (Double, Double) {
+        let r = plot
+        let tx = min(1, max(0, Double((loc.x - r.minX) / max(1, r.width))))
+        let ty = min(1, max(0, Double((r.maxY - loc.y) / max(1, r.height))))
+        return (tLo + tx * (tHi - tLo), rpmLo + ty * (rpmHi - rpmLo))
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = plot
+        let grid = dark ? NSColor.white.withAlphaComponent(0.08) : NSColor.black.withAlphaComponent(0.08)
+        let ink = dark ? NSColor.white.withAlphaComponent(0.55) : NSColor.black.withAlphaComponent(0.55)
+        let accent = NSColor(srgbRed: 0.04, green: 0.52, blue: 1.0, alpha: 1)
+        let box = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
+        (dark ? NSColor.white.withAlphaComponent(0.04) : NSColor.black.withAlphaComponent(0.03)).setFill()
+        box.fill()
+        grid.setStroke()
+        box.lineWidth = 1
+        box.stroke()
+
+        let font = NSFont.systemFont(ofSize: 9)
+        func label(_ s: String, _ at: NSPoint, _ align: NSTextAlignment) {
+            let para = NSMutableParagraphStyle()
+            para.alignment = align
+            let attr: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: ink, .paragraphStyle: para]
+            let w: CGFloat = 52
+            let x = align == .right ? at.x - w : (align == .center ? at.x - w / 2 : at.x)
+            (s as NSString).draw(in: NSRect(x: x, y: at.y, width: w, height: 14), withAttributes: attr)
+        }
+
+        for i in 0...3 {
+            let u = CGFloat(i) / 3
+            let y = r.maxY - u * r.height
+            let line = NSBezierPath()
+            line.move(to: NSPoint(x: r.minX, y: y))
+            line.line(to: NSPoint(x: r.maxX, y: y))
+            line.lineWidth = 1
+            grid.setStroke()
+            line.stroke()
+            let rpm = rpmLo + Double(u) * (rpmHi - rpmLo)
+            label(String(format: "%.0f", rpm), NSPoint(x: r.minX - 4, y: y - 7), .right)
+        }
+        for t in [30.0, 55.0, 80.0, 105.0] {
+            let x = r.minX + CGFloat((t - tLo) / (tHi - tLo)) * r.width
+            label(String(format: "%.0f°", t), NSPoint(x: x, y: r.maxY + 4), .center)
+        }
+
+        if nowTemp >= tLo && nowTemp <= tHi {
+            let x = r.minX + CGFloat((nowTemp - tLo) / (tHi - tLo)) * r.width
+            let dash = NSBezierPath()
+            dash.move(to: NSPoint(x: x, y: r.minY))
+            dash.line(to: NSPoint(x: x, y: r.maxY))
+            dash.lineWidth = 1
+            NSColor.systemOrange.withAlphaComponent(0.7).setStroke()
+            dash.setLineDash([3, 3], count: 2, phase: 0)
+            dash.stroke()
+            let nowP = FanCurvePoint(temp: nowTemp, rpm: nowRPM)
+            let np = pos(nowP)
+            NSColor.systemOrange.setFill()
+            NSBezierPath(ovalIn: NSRect(x: np.x - 3.5, y: np.y - 3.5, width: 7, height: 7)).fill()
+        }
+
+        var live = points
+        if let i = drag, live.indices.contains(i) {
+            live[i] = FanCurvePoint(temp: dragTemp, rpm: dragRPM)
+        }
+        let path = NSBezierPath()
+        path.lineWidth = 2
+        path.lineJoinStyle = .round
+        let steps = 48
+        for i in 0...steps {
+            let t = tLo + (tHi - tLo) * Double(i) / Double(steps)
+            let q = pos(FanCurvePoint(temp: t, rpm: FanCurves.rpm(t, live)))
+            if i == 0 { path.move(to: q) } else { path.line(to: q) }
+        }
+        accent.setStroke()
+        path.stroke()
+        if drag != nil {
+            let q = pos(FanCurvePoint(temp: dragTemp, rpm: dragRPM))
+            let hair = NSBezierPath()
+            hair.lineWidth = 1
+            hair.move(to: NSPoint(x: q.x, y: r.minY))
+            hair.line(to: NSPoint(x: q.x, y: r.maxY))
+            hair.move(to: NSPoint(x: r.minX, y: q.y))
+            hair.line(to: NSPoint(x: r.maxX, y: q.y))
+            hair.setLineDash([3, 2], count: 2, phase: 0)
+            accent.withAlphaComponent(0.7).setStroke()
+            hair.stroke()
+            let pillFont = NSFont.systemFont(ofSize: 8.5, weight: .bold)
+            let pillFg: [NSAttributedString.Key: Any] = [.font: pillFont, .foregroundColor: NSColor.white]
+            func pill(_ s: String, atX cx: CGFloat, atY cy: CGFloat) {
+                let size = (s as NSString).size(withAttributes: pillFg)
+                let w = size.width + 8
+                let h: CGFloat = 14
+                let x = min(bounds.width - w - 2, max(2, cx - w / 2))
+                let y = min(bounds.height - h - 2, max(2, cy - h / 2))
+                let rect = NSRect(x: x, y: y, width: w, height: h)
+                accent.setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 3.5, yRadius: 3.5).fill()
+                (s as NSString).draw(at: NSPoint(x: rect.minX + 4, y: rect.minY + 1.5), withAttributes: pillFg)
+            }
+            pill(String(format: "%.0f RPM", dragRPM), atX: r.minX - 22, atY: q.y)
+            pill(String(format: "%.0f°C", dragTemp), atX: q.x, atY: r.maxY + 12)
+        }
+        for p in live {
+            let q = pos(p)
+            let knob = NSRect(x: q.x - 7, y: q.y - 7, width: 14, height: 14)
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: knob).fill()
+            accent.setStroke()
+            let ring = NSBezierPath(ovalIn: knob.insetBy(dx: 0.5, dy: 0.5))
+            ring.lineWidth = 2
+            ring.stroke()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let loc = convert(event.locationInWindow, from: nil)
+        var best = -1
+        var bestD = CGFloat(18)
+        for (i, p) in points.enumerated() {
+            let q = pos(p)
+            let d = hypot(q.x - loc.x, q.y - loc.y)
+            if d < bestD { bestD = d; best = i }
+        }
+        drag = best >= 0 ? best : nil
+        if drag != nil { apply(loc) }
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard drag != nil else { return }
+        apply(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        drag = nil
+        needsDisplay = true
+    }
+
+    private func apply(_ loc: NSPoint) {
+        guard let i = drag else { return }
+        let v = values(loc)
+        dragTemp = v.0
+        dragRPM = v.1
+        onChange?(i, v.0, v.1)
+        needsDisplay = true
+    }
+}
+
+struct FanCurveEditor: NSViewRepresentable {
+    var points: [FanCurvePoint]
+    var rpmLo: Double
+    var rpmHi: Double
+    var nowTemp: Double
+    var nowRPM: Double
+    var dark: Bool
+    var onChange: (Int, Double, Double) -> Void
+
+    func makeNSView(context: Context) -> FanCurveView {
+        let v = FanCurveView()
+        updateNSView(v, context: context)
+        return v
+    }
+
+    func updateNSView(_ v: FanCurveView, context: Context) {
+        v.points = points
+        v.rpmLo = rpmLo
+        v.rpmHi = rpmHi
+        v.nowTemp = nowTemp
+        v.nowRPM = nowRPM
+        v.dark = dark
+        v.onChange = onChange
+        v.needsDisplay = true
+    }
+}
+
 struct SettingsRoot: View {
     @ObservedObject var app: App
     @ObservedObject var prefs: Prefs
+    @ObservedObject var sampler: Sampler
     @ObservedObject var updater = Updater.shared
 
     var page: String { app.settingsPage }
     var dark: Bool { app.currentScheme == .dark }
 
+    var pageInfo: (title: String, icon: String, color: Color) {
+        switch page {
+        case "appear": return ("Appearance", "paintpalette.fill", Color(red: 1.0, green: 0.35, blue: 0.55))
+        case "bar": return ("Menu Bar", "menubar.rectangle", Color(red: 0.20, green: 0.48, blue: 1.0))
+        case "drop": return ("Dropdown", "rectangle.split.2x1", Color(red: 0.62, green: 0.35, blue: 0.95))
+        case "toolbar": return ("Toolbar", "menubar.dock.rectangle", Color(red: 0.95, green: 0.55, blue: 0.15))
+        case "fans": return ("Fans", "fan", Color(red: 0.20, green: 0.72, blue: 0.78))
+        case "about": return ("About", "info.circle.fill", Color(red: 0.20, green: 0.52, blue: 0.96))
+        default: return ("General", "gearshape.fill", Color(red: 0.55, green: 0.55, blue: 0.58))
+        }
+    }
+
+    var contentHeader: some View {
+        HStack(spacing: 10) {
+            Image(systemName: pageInfo.icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 24, height: 24)
+                .background(pageInfo.color, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            Text(pageInfo.title)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
+            Spacer()
+        }
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             sidebar
-                .padding(.top, 38)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 10)
-                .frame(width: Chrome.rail, alignment: .top)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .background(Chrome.sidebar(dark))
-            ScrollView {
-                pageBody
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 38)
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 32)
+            ZStack(alignment: .topLeading) {
+                ScrollView {
+                    pageBody
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 56)
+                        .padding(.horizontal, 22)
+                        .padding(.bottom, 36)
+                }
+                .scrollContentBackground(.hidden)
+                .contentMargins(.all, 0, for: .scrollContent)
+                .mask(
+                    VStack(spacing: 0) {
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0.0),
+                                .init(color: .black.opacity(0.15), location: 0.35),
+                                .init(color: .black.opacity(0.65), location: 0.65),
+                                .init(color: .black, location: 1.0)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 70)
+                        Rectangle().fill(Color.black)
+                    }
+                )
+
+                contentHeader
+                    .padding(.top, 14)
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 12)
             }
-            .scrollContentBackground(.hidden)
-            .contentMargins(.all, 0, for: .scrollContent)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .ignoresSafeArea(.container, edges: .top)
-        .frame(minWidth: 600, maxWidth: 600, minHeight: 320, maxHeight: .infinity)
+        .frame(minWidth: 640, maxWidth: 640, minHeight: 480, maxHeight: .infinity)
         .background(Chrome.window(dark))
         .preferredColorScheme(app.currentScheme)
+        .tint(Color(red: 0.04, green: 0.52, blue: 1.0))
     }
 
     @ViewBuilder
@@ -657,6 +1060,7 @@ struct SettingsRoot: View {
         case "bar": barPage
         case "drop": dropdownPage
         case "toolbar": toolbarPage
+        case "fans": fansPage
         case "about": aboutPage
         default: generalPage
         }
@@ -686,10 +1090,47 @@ struct SettingsRoot: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
+            }
+            section("CPU") {
+                row("Percentage scale") {
+                    Picker("", selection: Binding(
+                        get: { prefs.cpuProcMode },
+                        set: { prefs.setCpuProcMode($0) }
+                    )) {
+                        Text("Total System (0-100%)").tag("total")
+                        Text("Per-Core (Activity Monitor)").tag("perCore")
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .clickHover()
+                }
                 Divider().padding(.leading, 14)
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("RAM processes count").font(Chrome.text)
+                        Text("Processes count").font(Chrome.text)
+                        Spacer()
+                        Text("\(prefs.cpuProcCount)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Chrome.badge(dark), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    }
+                    Slider(
+                        value: Binding(get: { Double(prefs.cpuProcCount) }, set: { prefs.setCpuProcCount(Int($0)) }),
+                        in: 3...20,
+                        step: 1
+                    )
+                    Text("Number of CPU-heavy processes to list in the CPU panel.")
+                        .font(Chrome.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+            section("Memory") {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Processes count").font(Chrome.text)
                         Spacer()
                         Text("\(prefs.ramProcCount)")
                             .font(.system(size: 11, design: .monospaced))
@@ -710,10 +1151,24 @@ struct SettingsRoot: View {
                 .padding(.vertical, 10)
             }
             section("System") {
+                row("Smooth Animations") {
+                    Toggle("", isOn: Binding(get: { prefs.animations }, set: { prefs.setAnimations($0) }))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                Divider().padding(.leading, 14)
                 row("Launch at Login") {
                     Toggle("", isOn: Binding(get: { prefs.login }, set: { prefs.setLogin($0) }))
                         .labelsHidden()
                         .toggleStyle(.switch)
+                }
+                Divider().padding(.leading, 14)
+                row("Setup Guide") {
+                    Button("Show Onboarding…") {
+                        app.openOnboarding()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
                 Divider().padding(.leading, 14)
                 row("Quit Sino") {
@@ -729,6 +1184,24 @@ struct SettingsRoot: View {
                     Toggle("", isOn: Binding(
                         get: { app.preventDisplaySleep },
                         set: { app.setPreventDisplaySleep($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+                Divider().padding(.leading, 14)
+                row("Prevent lid-close sleep (clamshell)") {
+                    Toggle("", isOn: Binding(
+                        get: { prefs.preventLidSleep },
+                        set: { app.setPreventLidSleep($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+                Divider().padding(.leading, 14)
+                row("Right-click status bar to toggle") {
+                    Toggle("", isOn: Binding(
+                        get: { prefs.rightClickAwake },
+                        set: { prefs.setRightClickAwake($0) }
                     ))
                     .labelsHidden()
                     .toggleStyle(.switch)
@@ -751,7 +1224,7 @@ struct SettingsRoot: View {
     }
 
     func appRow(_ slot: Int) -> some View {
-        let path = slot == 2 ? prefs.customApp2 : prefs.customApp
+        let path = prefs.customAppPath(slot: slot)
         return HStack(spacing: 8) {
             if let img = prefs.customAppIcon(slot: slot) {
                 Image(nsImage: img).resizable().frame(width: 16, height: 16)
@@ -878,9 +1351,26 @@ struct SettingsRoot: View {
     }
 
     var barPage: some View {
-        SettingsGroup {
-            BarOrderTable(prefs: prefs)
-                .frame(height: CGFloat(max(prefs.barOrder.count, 1)) * 36)
+        VStack(alignment: .leading, spacing: 14) {
+            SettingsGroup {
+                BarOrderTable(prefs: prefs)
+                    .frame(height: CGFloat(max(prefs.barOrder.count, 1)) * 36)
+            }
+            Text("Drag to reorder chips. Toggle switches control chip visibility.")
+                .font(Chrome.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+
+            section("Actions") {
+                row("Right-click to toggle Awake") {
+                    Toggle("", isOn: Binding(
+                        get: { prefs.rightClickAwake },
+                        set: { prefs.setRightClickAwake($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+            }
         }
     }
 
@@ -895,6 +1385,152 @@ struct SettingsRoot: View {
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 4)
         }
+    }
+
+    var fansPage: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            section("Control") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("", selection: Binding(
+                        get: { app.fanMode },
+                        set: { app.setFanMode($0) }
+                    )) {
+                        Text("Auto").tag(FanMode.auto)
+                        Text("Manual").tag(FanMode.manual)
+                        Text("Curve").tag(FanMode.curve)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(app.fanCtlBusy)
+                    Text(fanModeCaption)
+                        .font(Chrome.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+            section("Presets") {
+                HStack(spacing: 8) {
+                    Button("Silent") { prefs.applyFanPreset("silent", minRPM: fanLo, maxRPM: fanHi) }
+                    Button("Balanced") { prefs.applyFanPreset("balanced", minRPM: fanLo, maxRPM: fanHi) }
+                    Button("Full") { prefs.applyFanPreset("full", minRPM: fanLo, maxRPM: fanHi) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(app.fanCtlBusy)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+            if app.fanMode == .curve {
+                section("Curve") {
+                    row("Sensor") {
+                        Text(String(format: "Hottest %.0f °C → %.0f RPM", app.hottestTemp(), app.curveTarget()))
+                            .font(Chrome.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    FanCurveEditor(
+                        points: prefs.fanCurve,
+                        rpmLo: fanLo,
+                        rpmHi: fanHi,
+                        nowTemp: app.hottestTemp(),
+                        nowRPM: app.curveTarget(),
+                        dark: dark,
+                        onChange: { i, t, r in prefs.setCurvePoint(i, temp: t, rpm: r) }
+                    )
+                    .frame(height: 176)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 10)
+                    Text("Drag the dots. X = °C, Y = RPM. Orange = now.")
+                        .font(Chrome.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 10)
+                }
+            }
+            if app.fanMode == .manual {
+                section("Speeds") {
+                    if sampler.snap.fans.isEmpty {
+                        Text("No fans reported.")
+                            .font(Chrome.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(14)
+                    } else {
+                        ForEach(sampler.snap.fans) { f in
+                            fanSpeedRow(f)
+                        }
+                    }
+                }
+            }
+            section("Helper") {
+                row("SMC writer") {
+                    Text(FanCtl.ready ? "Ready" : "Not installed")
+                        .font(Chrome.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Divider().padding(.leading, 14)
+                row("Install") {
+                    Button(FanCtl.ready ? "Reinstall…" : "Install…") {
+                        _ = FanCtl.install()
+                        app.objectWillChange.send()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(app.fanCtlBusy)
+                }
+            }
+        }
+    }
+
+    var fanModeCaption: String {
+        switch app.fanMode {
+        case .auto: return "macOS/SMC picks RPM. Sino does not write."
+        case .manual: return "Fixed RPM until you change it. Auto when Sino quits."
+        case .curve: return "Hottest sensor → RPM. Auto when Sino quits."
+        }
+    }
+
+    var fanLo: Double {
+        let v = sampler.snap.fans.map(\.minRPM).min() ?? 2317
+        return v > 500 ? v : 2317
+    }
+
+    var fanHi: Double {
+        let v = sampler.snap.fans.map(\.maxRPM).max() ?? 6800
+        return v > fanLo ? v : 6800
+    }
+
+    @ViewBuilder
+    func fanSpeedRow(_ f: FanSample) -> some View {
+        if f.id > 0 { Divider().padding(.leading, 14) }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(f.name).font(Chrome.text)
+                Spacer()
+                Text("\(Int((app.fanTargets[f.id] ?? f.rpm).rounded())) RPM")
+                    .font(.system(size: 11, design: .monospaced))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Chrome.badge(dark), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            }
+            Slider(
+                value: Binding(
+                    get: { app.fanTargets[f.id] ?? f.rpm },
+                    set: { app.setFanTarget(f.id, $0) }
+                ),
+                in: fanRange(f)
+            )
+            Text("Range \(Int(fanRange(f).lowerBound))–\(Int(fanRange(f).upperBound)) RPM")
+                .font(Chrome.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    func fanRange(_ f: FanSample) -> ClosedRange<Double> {
+        let lo = f.minRPM > 500 ? f.minRPM : 2000
+        let hi = f.maxRPM > lo ? f.maxRPM : 6800
+        return lo...hi
     }
 
     var aboutPage: some View {
@@ -970,31 +1606,45 @@ struct SettingsRoot: View {
     }
 
     var sidebar: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             nav("general", "General", "gearshape.fill", Color(red: 0.55, green: 0.55, blue: 0.58))
             nav("appear", "Appearance", "paintpalette.fill", Color(red: 1.0, green: 0.35, blue: 0.55))
             nav("bar", "Menu Bar", "menubar.rectangle", Color(red: 0.20, green: 0.48, blue: 1.0))
             nav("drop", "Dropdown", "rectangle.split.2x1", Color(red: 0.62, green: 0.35, blue: 0.95))
             nav("toolbar", "Toolbar", "menubar.dock.rectangle", Color(red: 0.95, green: 0.55, blue: 0.15))
+            nav("fans", "Fans", "fan", Color(red: 0.20, green: 0.72, blue: 0.78))
             nav("about", "About", "info.circle.fill", Color(red: 0.20, green: 0.52, blue: 0.96))
             Spacer(minLength: 0)
         }
+        .padding(.top, 46)
+        .padding(.horizontal, 8)
+        .padding(.bottom, 10)
+        .frame(width: Chrome.rail, alignment: .top)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Chrome.sidebar(dark))
+        )
+        .padding(.leading, 9)
+        .padding(.vertical, 8)
     }
 
     func nav(_ id: String, _ title: String, _ icon: String, _ color: Color) -> some View {
-        Button { app.settingsPage = id } label: {
+        Button { app.selectSettingsPage(id) } label: {
             HStack(spacing: 10) {
                 Image(systemName: icon)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 24, height: 24)
+                    .frame(width: 22, height: 22)
                     .background(color, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                Text(title).font(.system(size: 13, weight: .regular)).foregroundStyle(.primary)
+                Text(title)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(page == id ? .white : .primary)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
             .contentShape(Rectangle())
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1002,12 +1652,14 @@ struct SettingsRoot: View {
             )
         }
         .buttonStyle(.plain)
-        .settingsHover(radius: 10)
+        .settingsHover(radius: 8)
     }
 
     func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(Chrome.section)
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
             SettingsGroup { content() }
         }
     }
@@ -1666,8 +2318,9 @@ struct SettingsGroup<Content: View>: View {
     let content: Content
     init(@ViewBuilder content: () -> Content) { self.content = content() }
     var body: some View {
+        let dark = scheme == .dark
         VStack(spacing: 0) { content }
-            .background(Chrome.group(scheme == .dark), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(Chrome.group(dark), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -1681,13 +2334,13 @@ struct SettingsRow<Trailing: View>: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(Chrome.text)
+                Text(title).font(Chrome.text).foregroundStyle(.white)
             }
             Spacer()
             trailing
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
     }
 }
 
@@ -2081,5 +2734,217 @@ final class AwakeShortcutView: NSView {
             stopRecording()
         }
         super.viewWillMove(toWindow: newWindow)
+    }
+}
+
+// MARK: - Location Permission Manager
+final class LocationPermission: NSObject, ObservableObject, CLLocationManagerDelegate {
+    static let shared = LocationPermission()
+    private let manager = CLLocationManager()
+    @Published var status: CLAuthorizationStatus
+
+    override init() {
+        status = manager.authorizationStatus
+        super.init()
+        manager.delegate = self
+    }
+
+    var isAuthorized: Bool {
+        status == .authorizedAlways
+    }
+
+    var isDenied: Bool {
+        status == .denied || status == .restricted
+    }
+
+    func request() {
+        manager.requestAlwaysAuthorization()
+    }
+
+    func refresh() {
+        status = manager.authorizationStatus
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        DispatchQueue.main.async {
+            self.status = manager.authorizationStatus
+        }
+    }
+}
+
+// MARK: - First-Launch Onboarding View
+final class OnboardingState: ObservableObject {
+    @Published var sudoersInstalled: Bool = PMSetHelper.isSudoersInstalled
+    @Published var isConfiguringClamshell: Bool = false
+
+    func refresh() {
+        sudoersInstalled = PMSetHelper.isSudoersInstalled
+    }
+
+    func configureClamshell(app: App) {
+        isConfiguringClamshell = true
+        Thread.detachNewThread { [weak self] in
+            let ok: Bool = PMSetHelper.installSudoers()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isConfiguringClamshell = false
+                self.sudoersInstalled = PMSetHelper.isSudoersInstalled
+                if ok {
+                    app.prefs.setPreventLidSleep(true)
+                }
+            }
+        }
+    }
+}
+
+struct OnboardingView: View {
+    @ObservedObject var app: App
+    @ObservedObject var prefs: Prefs
+    @ObservedObject var location = LocationPermission.shared
+    @ObservedObject var state = OnboardingState()
+
+    var dark: Bool { app.currentScheme == .dark }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            VStack(spacing: 10) {
+                if let icon = NSApp.applicationIconImage ?? NSImage(named: "AppIcon") {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(width: 56, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .shadow(color: Color.black.opacity(dark ? 0.40 : 0.12), radius: 6, y: 3)
+                }
+                Text("Welcome to Sino")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(.primary)
+                Text("Configure optional permissions for enhanced monitoring and clamshell sleep control.")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+                    .padding(.horizontal, 16)
+            }
+            .padding(.top, 32)
+            .padding(.horizontal, 24)
+
+            // Permissions list
+            VStack(spacing: 12) {
+                SettingsGroup {
+                    HStack(alignment: .top, spacing: 14) {
+                        Image(systemName: "wifi")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 32, height: 32)
+                            .background(Color.blue, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Wi-Fi Network Name").font(Chrome.section)
+                                Spacer()
+                                if location.isAuthorized {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(.green)
+                                        Text("Granted")
+                                            .font(Chrome.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                } else if location.isDenied {
+                                    Button("Open Settings") {
+                                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices") {
+                                            NSWorkspace.shared.open(url)
+                                        }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                } else {
+                                    Button("Enable") {
+                                        location.request()
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                }
+                            }
+                            Text("macOS requires Location permission to display the active Wi-Fi SSID in the menu bar and network card. Without it, Sino displays \"Wi-Fi\".")
+                                .font(Chrome.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(14)
+                }
+
+                SettingsGroup {
+                    HStack(alignment: .top, spacing: 14) {
+                        Image(systemName: "moon.stars.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 32, height: 32)
+                            .background(Color.indigo, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Clamshell Sleep (Optional)").font(Chrome.section)
+                                Spacer()
+                                if state.sudoersInstalled {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(.green)
+                                        Text("Configured")
+                                            .font(Chrome.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                } else {
+                                    Button(state.isConfiguringClamshell ? "Configuring…" : "Configure…") {
+                                        state.configureClamshell(app: app)
+                                    }
+                                    .disabled(state.isConfiguringClamshell)
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                            }
+                            Text("Allows Awake to keep your MacBook awake when the lid is closed. Installs a passwordless pmset rule (/etc/sudoers.d/sino_awake) via an admin prompt.")
+                                .font(Chrome.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(14)
+                }
+            }
+            .padding(.top, 20)
+            .padding(.horizontal, 24)
+
+            Spacer(minLength: 16)
+
+            // Footer
+            HStack {
+                Button("Skip for Now") {
+                    app.closeOnboarding()
+                }
+                .buttonStyle(.plain)
+                .font(Chrome.text)
+                .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button("Get Started") {
+                    app.closeOnboarding()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 22)
+        }
+        .frame(width: 480, height: 430)
+        .background(Chrome.window(dark))
+        .preferredColorScheme(app.currentScheme)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            location.refresh()
+            state.refresh()
+        }
     }
 }

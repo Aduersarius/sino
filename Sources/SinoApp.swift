@@ -7,6 +7,21 @@ import SwiftUI
 @main
 enum Sino {
     static func main() {
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.lov3u.sino"
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let siblings = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != myPID }
+
+        if !siblings.isEmpty {
+            // Already running: activate existing instance and exit
+            if #available(macOS 14.0, *) {
+                siblings.first?.activate()
+            } else {
+                siblings.first?.activate(options: [.activateIgnoringOtherApps])
+            }
+            exit(0)
+        }
+
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         app.delegate = App.shared
@@ -25,9 +40,13 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var cleanFeedback: String? = nil
     @Published var fetchingIP = false
     @Published var confirmingKillPid: pid_t? = nil
+    var activeKillButton: NSView?
     @Published var isAwakeActive = false
-    @Published var preventDisplaySleep = true
     @Published var awakeRemainingSeconds: Int? = nil // nil = indefinite
+    @Published var fanMode: FanMode = .auto
+    @Published var fanTargets: [Int: Double] = [:]
+    @Published var fanCtlBusy = false
+    private var fanHold: Timer?
     private var awakeAssertionID: IOPMAssertionID = 0
     private var awakeTimer: Timer? = nil
     enum Panel: Equatable { case cpu, ram, storage, net, fans, battery, gpu }
@@ -44,9 +63,12 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     private var hidePanel: DispatchWorkItem?
     private var clickMon: Any?
     private var barClickMon: Any?
-    private var catcher: NSPanel?
+    private var dropClickMon: Any?
+    private var flashTimer: Timer?
+    private var catchers: [NSPanel] = []
     private var hoverMon: Any?
     var settingsWC: NSWindowController?
+    var onboardingWC: NSWindowController?
     private var dropOpen = false
     private var ignoreClicksUntil = Date.distantPast
     private var lastDark = false
@@ -56,6 +78,25 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyTheme()
         lastDark = currentScheme == .dark
+        if let idx = CommandLine.arguments.firstIndex(of: "--render-settings-png"), idx + 1 < CommandLine.arguments.count {
+            let out = CommandLine.arguments[idx + 1]
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                if let w = self?.settingsWC?.window, let view = w.contentView {
+                    let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+                    view.cacheDisplay(in: view.bounds, to: rep)
+                    if let data = rep.representation(using: .png, properties: [:]) {
+                        try? data.write(to: URL(fileURLWithPath: out))
+                        print("Saved to \(out)")
+                    }
+                }
+                exit(0)
+            }
+            return
+        } else if CommandLine.arguments.contains("--settings") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.openSettings()
+            }
+        }
         appearObs = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
             guard let self, self.theme == "system" else { return }
             let dark = self.currentScheme == .dark
@@ -80,7 +121,26 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         mainMenu.addItem(appItem)
         NSApp.mainMenu = mainMenu
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.stopAwake()
+            self?.stopAwake(resetPMSet: true, sync: true)
+            self?.releaseFans()
+        }
+        if PMSetHelper.isSleepDisabled {
+            DispatchQueue.global(qos: .utility).async {
+                PMSetHelper.setSleepDisabled(false)
+            }
+        }
+        // ponytail: auto-dismiss drop on space/desktop change or app switching/deactivation
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.hideDrop()
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.hideDrop()
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didDeactivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.hideDrop()
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.hideDrop()
         }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let button = item.button else { return }
@@ -89,10 +149,17 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         button.imageScaling = .scaleNone
         extra = ExtraView(frame: NSRect(x: 0, y: 0, width: 70, height: 22))
         // ponytail: chips live in button.image so NSStatusBarButton.highlight is visible
-        barClickMon = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] e in
+        barClickMon = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .rightMouseDown]) { [weak self] e in
             guard let self, let button = self.item.button, e.window == button.window else { return e }
             let p = button.convert(e.locationInWindow, from: nil)
             guard button.bounds.contains(p) else { return e }
+            if e.type == .rightMouseDown {
+                if self.prefs.rightClickAwake {
+                    self.toggleAwakeWithFlash()
+                    return nil
+                }
+                return e
+            }
             if e.type == .leftMouseDown {
                 self.toggle()
                 return nil
@@ -129,6 +196,11 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             }
             .store(in: &bag)
         refreshMenu()
+        if !prefs.hasCompletedOnboarding {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.openOnboarding()
+            }
+        }
     }
 
     var currentScheme: ColorScheme {
@@ -187,7 +259,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         if abs(item.length - len) > 0.5 {
             item.length = len
         }
-        if chips != lastChips || button.image == nil {
+        if chips != lastChips || button.image == nil || extra.flashAlpha > 0 {
             lastChips = chips
             button.effectiveAppearance.performAsCurrentDrawingAppearance {
                 button.image = extra.makeImage()
@@ -211,9 +283,87 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    func releaseFans() {
+        fanHold?.invalidate()
+        fanHold = nil
+        fanMode = .auto
+        fanTargets = [:]
+        sino_fan_ctl_auto()
+        sino_fan_ctl_close()
+    }
+
+    func setFanManual(_ on: Bool) {
+        setFanMode(on ? .manual : .auto)
+    }
+
+    func setFanMode(_ mode: FanMode) {
+        if fanCtlBusy { return }
+        if mode == .auto {
+            releaseFans()
+            return
+        }
+        if sino_fan_ctl_open() == 0 {
+            armFans(mode)
+            return
+        }
+        fanCtlBusy = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ok = FanCtl.install() && sino_fan_ctl_open() == 0
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.fanCtlBusy = false
+                if ok { self.armFans(mode) }
+            }
+        }
+    }
+
+    private func armFans(_ mode: FanMode) {
+        fanMode = mode
+        if mode == .manual {
+            for f in sampler.snap.fans {
+                let t = fanTargets[f.id] ?? f.rpm
+                fanTargets[f.id] = t
+            }
+        }
+        fanHold?.invalidate()
+        fanHold = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.reassertFans()
+        }
+        reassertFans()
+    }
+
+    func setFanTarget(_ id: Int, _ rpm: Double) {
+        guard fanMode == .manual else { return }
+        fanTargets[id] = rpm
+        _ = sino_fan_ctl_set(Int32(id), Float(rpm))
+    }
+
+    func hottestTemp() -> Double {
+        sampler.snap.temps.map(\.c).max() ?? 0
+    }
+
+    func curveTarget() -> Double {
+        FanCurves.rpm(hottestTemp(), prefs.fanCurve)
+    }
+
+    func reassertFans() {
+        switch fanMode {
+        case .auto: return
+        case .manual:
+            for (id, rpm) in fanTargets {
+                if sino_fan_ctl_set(Int32(id), Float(rpm)) != 0 { break }
+            }
+        case .curve:
+            let rpm = curveTarget()
+            for f in sampler.snap.fans {
+                fanTargets[f.id] = rpm
+                if sino_fan_ctl_set(Int32(f.id), Float(rpm)) != 0 { break }
+            }
+        }
+    }
+
     func menuChips() -> [MenuChip] {
         let s = sampler.snap
-        func pct(_ v: Double) -> String { "\(Int((min(1, max(0, v)) * 100).rounded()))%" }
         func chip(_ id: String) -> MenuChip? {
             switch id {
             case "ram": return MenuChip(label: "MEM", value: pct(s.ramPressure))
@@ -243,13 +393,12 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     func sizePopover() {
         guard host != nil, drop != nil else { return }
-        host.rootView = Dashboard(app: self, mode: .main)
         host.view.layoutSubtreeIfNeeded()
         var h = host.view.fittingSize.height
         if h < 80 { h = 120 }
         h = min(h, 780)
         positionDrop(NSSize(width: 268, height: h))
-        if let c = catcher { drop.order(.above, relativeTo: c.windowNumber) }
+        for c in catchers { drop.order(.above, relativeTo: c.windowNumber) }
         if panel != nil { showDetail() } else { hideDetail() }
     }
 
@@ -277,7 +426,6 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         guard drop.isVisible, let panel, detail != nil else { return }
         host.view.layoutSubtreeIfNeeded()
         refreshCardFrames(host.view)
-        detailHost.rootView = Dashboard(app: self, mode: .detail)
         detailHost.view.layoutSubtreeIfNeeded()
         var h = detailHost.view.fittingSize.height
         if h < 80 { h = 120 }
@@ -294,9 +442,23 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             x = min(max(x, vis.minX + 6), vis.maxX - w - 6)
             y = min(max(y, vis.minY + 6), vis.maxY - h - 6)
         }
-        detail.setFrame(NSRect(x: x, y: y, width: w, height: h), display: true)
-        if !detail.isVisible { detail.orderFrontRegardless() }
-        if let c = catcher { detail.order(.above, relativeTo: c.windowNumber) }
+        let next = NSRect(x: x, y: y, width: w, height: h)
+        let f = detail.frame
+        let needsResize = abs(f.minX - next.minX) > 0.5 || abs(f.minY - next.minY) > 0.5
+            || abs(f.width - next.width) > 1 || abs(f.height - next.height) > 2
+        if !detail.isVisible {
+            detail.setFrame(next, display: true)
+            detail.orderFrontRegardless()
+        } else if needsResize {
+            // ponytail: snappy frame resize animation synchronized with content transition
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.11
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.allowsImplicitAnimation = true
+                detail.animator().setFrame(next, display: true)
+            }
+        }
+        for c in catchers { detail.order(.above, relativeTo: c.windowNumber) }
         armTrack(detail)
     }
 
@@ -332,7 +494,61 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         setTheme(next)
     }
 
-    // ponytail: IOPMAssertion sleep prevention (awake) -> upgrade: lid-closed clamshell mode
+    func toggleAwakeWithFlash() {
+        toggleAwake()
+        flashMenuBarItem(active: isAwakeActive)
+    }
+
+    func flashMenuBarItem(active: Bool) {
+        flashTimer?.invalidate()
+        flashTimer = nil
+        let color = active
+            ? NSColor(srgbRed: 0.20, green: 0.82, blue: 0.38, alpha: 1.0) // ON: Green
+            : NSColor(srgbRed: 1.00, green: 0.32, blue: 0.30, alpha: 1.0) // OFF: Red
+        extra?.flashColor = color
+        extra?.flashAlpha = 1.0
+
+        if let button = item?.button {
+            button.effectiveAppearance.performAsCurrentDrawingAppearance {
+                button.image = extra?.makeImage()
+            }
+        }
+
+        let startTime = Date()
+        let duration: TimeInterval = 0.35
+        if let button = item?.button {
+            button.isHighlighted = true
+            button.highlight(true)
+        }
+        flashTimer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] timer in
+            guard let self, let extra = self.extra, let button = self.item?.button else {
+                timer.invalidate()
+                return
+            }
+            let elapsed = Date().timeIntervalSince(startTime)
+            if elapsed >= duration {
+                timer.invalidate()
+                self.flashTimer = nil
+                extra.flashAlpha = 0
+                extra.flashColor = nil
+                if !self.dropOpen {
+                    button.isHighlighted = false
+                    button.highlight(false)
+                }
+                button.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    button.image = extra.makeImage()
+                }
+            } else {
+                extra.flashAlpha = CGFloat(1.0 - (elapsed / duration))
+                button.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    button.image = extra.makeImage()
+                }
+            }
+        }
+        if let flashTimer {
+            RunLoop.main.add(flashTimer, forMode: .common)
+        }
+    }
     func toggleAwake(duration: TimeInterval? = nil) {
         if isAwakeActive {
             stopAwake()
@@ -341,9 +557,19 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    var preventDisplaySleep: Bool {
+        get { prefs.preventDisplaySleep }
+        set { setPreventDisplaySleep(newValue) }
+    }
+
+    var preventLidSleep: Bool {
+        get { prefs.preventLidSleep }
+        set { setPreventLidSleep(newValue) }
+    }
+
     func startAwake(duration: TimeInterval? = nil) {
-        stopAwake()
-        let type = preventDisplaySleep ? kIOPMAssertionTypePreventUserIdleDisplaySleep : kIOPMAssertionTypePreventUserIdleSystemSleep
+        stopAwake(resetPMSet: false)
+        let type = prefs.preventDisplaySleep ? kIOPMAssertionTypePreventUserIdleDisplaySleep : kIOPMAssertionTypePreventUserIdleSystemSleep
         var id: IOPMAssertionID = 0
         let ret = IOPMAssertionCreateWithName(
             type as CFString,
@@ -354,6 +580,16 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         if ret == kIOReturnSuccess {
             awakeAssertionID = id
             isAwakeActive = true
+            if prefs.preventLidSleep {
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    let ok = PMSetHelper.setSleepDisabled(true)
+                    if !ok {
+                        DispatchQueue.main.async {
+                            self?.prefs.setPreventLidSleep(false)
+                        }
+                    }
+                }
+            }
             if let duration, duration > 0 {
                 awakeRemainingSeconds = Int(duration)
                 awakeTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -370,7 +606,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
-    func stopAwake() {
+    func stopAwake(resetPMSet: Bool = true, sync: Bool = false) {
         awakeTimer?.invalidate()
         awakeTimer = nil
         awakeRemainingSeconds = nil
@@ -378,14 +614,37 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             IOPMAssertionRelease(awakeAssertionID)
             awakeAssertionID = 0
         }
+        if resetPMSet && (prefs.preventLidSleep || PMSetHelper.isSleepDisabled) {
+            if sync {
+                PMSetHelper.setSleepDisabled(false)
+            } else {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    PMSetHelper.setSleepDisabled(false)
+                }
+            }
+        }
         isAwakeActive = false
     }
 
     func setPreventDisplaySleep(_ prevent: Bool) {
-        preventDisplaySleep = prevent
+        prefs.setPreventDisplaySleep(prevent)
         if isAwakeActive {
             let dur: TimeInterval? = awakeRemainingSeconds.map { TimeInterval($0) }
             startAwake(duration: dur)
+        }
+    }
+
+    func setPreventLidSleep(_ prevent: Bool) {
+        prefs.setPreventLidSleep(prevent)
+        if isAwakeActive {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let ok = PMSetHelper.setSleepDisabled(prevent)
+                if !ok && prevent {
+                    DispatchQueue.main.async {
+                        self?.prefs.setPreventLidSleep(false)
+                    }
+                }
+            }
         }
     }
 
@@ -402,7 +661,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func openCustomApp(slot: Int = 1) {
-        let path = slot == 2 ? prefs.customApp2 : prefs.customApp
+        let path = prefs.customAppPath(slot: slot)
         if path.isEmpty || !FileManager.default.fileExists(atPath: path) {
             hideDrop()
             DispatchQueue.main.async { self.prefs.pickCustomApp(slot: slot) }
@@ -420,14 +679,22 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    func selectSettingsPage(_ page: String) {
+        settingsPage = page
+        if page == "appear" || page == "drop" {
+            showDrop()
+        } else {
+            hideDrop()
+        }
+    }
+
     func setPanel(_ v: Panel?) {
-        hidePanel?.cancel()
         hidePanel = nil
         if let v {
             let changed = panel != v
             panel = v
             if changed || detail?.isVisible != true {
-                DispatchQueue.main.async { self.showDetail() }
+                showDetail()
             }
             return
         }
@@ -455,22 +722,51 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    func cleanRAM() {
+        guard !cleaningRAM else { return }
+        cleaningRAM = true
+        cleanFeedback = nil
+        sampler.cleanRAM { freed in
+            self.cleaningRAM = false
+            withAnimation(.easeInOut(duration: 0.2)) {
+                if freed >= 1024 * 1024 * 1024 {
+                    self.cleanFeedback = String(format: "Freed %.2f GB", Double(freed) / (1024 * 1024 * 1024))
+                } else if freed > 0 {
+                    self.cleanFeedback = "Freed \(freed / (1024 * 1024)) MB"
+                } else {
+                    self.cleanFeedback = "Optimized"
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    self.cleanFeedback = nil
+                }
+            }
+        }
+    }
+
+    func showDrop() {
+        guard !dropOpen else { return }
+        ignoreClicksUntil = Date().addingTimeInterval(0.1)
+        dropOpen = true
+        sampler.runHeavy()
+        objectWillChange.send()
+        refreshMenu()
+        sizePopover()
+        drop.orderFrontRegardless()
+        startClickMon()
+    }
+
     @objc func toggle() {
         if dropOpen {
             hideDrop()
         } else {
-            ignoreClicksUntil = Date().addingTimeInterval(0.35)
-            dropOpen = true
-            sampler.runHeavy()
-            objectWillChange.send()
-            refreshMenu()
-            sizePopover()
-            drop.orderFrontRegardless()
-            startClickMon()
+            showDrop()
         }
     }
 
     func hideDrop() {
+        guard drop != nil else { return }
         TooltipManager.shared.hideImmediately()
         hideDetail()
         drop.orderOut(nil)
@@ -484,31 +780,55 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     func startClickMon() {
         stopClickMon()
-        clickMon = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+        clickMon = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
             self?.closeIfOutside()
         }
-        // ponytail: WindowServer skips fully-clear pixels — 1/255 is enough to hit-test
-        let screen = (item.button?.window?.screen ?? NSScreen.main)?.frame ?? .zero
-        let p = NSPanel(contentRect: screen, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        p.isOpaque = false
-        p.backgroundColor = NSColor.black.withAlphaComponent(1.0 / 255.0)
-        p.hasShadow = false
-        p.ignoresMouseEvents = false
-        p.level = NSWindow.Level(rawValue: drop.level.rawValue - 1)
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        p.hidesOnDeactivate = false
-        p.isFloatingPanel = true
-        let v = CatcherView(frame: NSRect(origin: .zero, size: screen.size))
-        v.autoresizingMask = [.width, .height]
-        v.onDown = { [weak self] in self?.closeIfOutside() }
-        p.contentView = v
-        p.setFrame(screen, display: false)
-        p.orderFrontRegardless()
-        catcher = p
-        // ponytail: catcher stays one level below; re-front drop so hover hits cards
-        drop.order(.above, relativeTo: p.windowNumber)
-        if detail.isVisible { detail.order(.above, relativeTo: p.windowNumber) }
+        // ponytail: span catcher across all screens so multi-monitor clicks dismiss reliably even with separate spaces
+        let screens = NSScreen.screens.isEmpty ? [(item.button?.window?.screen ?? NSScreen.main)].compactMap { $0 } : NSScreen.screens
+        catchers = screens.map { s in
+            let p = NSPanel(contentRect: s.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            p.isOpaque = false
+            p.backgroundColor = NSColor.black.withAlphaComponent(1.0 / 255.0)
+            p.hasShadow = false
+            p.ignoresMouseEvents = false
+            p.level = NSWindow.Level(rawValue: drop.level.rawValue - 1)
+            p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+            p.hidesOnDeactivate = false
+            p.isFloatingPanel = true
+            let v = CatcherView(frame: NSRect(origin: .zero, size: s.frame.size))
+            v.autoresizingMask = [.width, .height]
+            v.onDown = { [weak self] in self?.closeIfOutside() }
+            p.contentView = v
+            p.setFrame(s.frame, display: false)
+            p.orderFrontRegardless()
+            return p
+        }
+        // ponytail: catchers stay one level below; re-front drop so hover hits cards
+        for c in catchers {
+            drop.order(.above, relativeTo: c.windowNumber)
+            if detail.isVisible { detail.order(.above, relativeTo: c.windowNumber) }
+        }
         startHoverMon()
+        dropClickMon = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] e in
+            guard let self else { return e }
+            if self.confirmingKillPid != nil {
+                if let btn = self.activeKillButton, let win = btn.window, e.window == win {
+                    let loc = btn.convert(e.locationInWindow, from: nil)
+                    if !btn.bounds.contains(loc) {
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                            self.confirmingKillPid = nil
+                            self.activeKillButton = nil
+                        }
+                    }
+                } else {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                        self.confirmingKillPid = nil
+                        self.activeKillButton = nil
+                    }
+                }
+            }
+            return e
+        }
     }
 
     func startHoverMon() {
@@ -563,9 +883,11 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func stopClickMon() {
         if let clickMon { NSEvent.removeMonitor(clickMon) }
         clickMon = nil
+        if let dropClickMon { NSEvent.removeMonitor(dropClickMon) }
+        dropClickMon = nil
         stopHoverMon()
-        catcher?.orderOut(nil)
-        catcher = nil
+        catchers.forEach { $0.orderOut(nil) }
+        catchers.removeAll()
     }
 
     func closeIfOutside() {
@@ -578,36 +900,117 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             let br = w.convertToScreen(button.convert(button.bounds, to: nil))
             if br.contains(loc) { return }
         }
-        if let sw = settingsWC?.window, sw.isVisible, sw.frame.contains(loc) { return }
+        if let sw = settingsWC?.window, sw.isVisible, sw.frame.contains(loc) {
+            // Keep drop open only if settings is on appearance or dropdown tab
+            if settingsPage == "appear" || settingsPage == "drop" {
+                return
+            }
+        }
+        if let ow = onboardingWC?.window, ow.isVisible, ow.frame.contains(loc) { return }
         hideDrop()
     }
 
+final class SettingsWindow: NSWindow {
+    override func layoutIfNeeded() {
+        super.layoutIfNeeded()
+        adjustButtons()
+    }
+
+    override func setFrame(_ frameRect: NSRect, display displayFlag: Bool) {
+        super.setFrame(frameRect, display: displayFlag)
+        adjustButtons()
+    }
+
+    private func adjustButtons() {
+        guard let close = standardWindowButton(.closeButton),
+              let minB = standardWindowButton(.miniaturizeButton),
+              let zoom = standardWindowButton(.zoomButton) else { return }
+        close.frame.origin.x = 20
+        close.frame.origin.y = 4
+        minB.frame.origin.x = close.frame.maxX + 6
+        minB.frame.origin.y = 4
+        zoom.frame.origin.x = minB.frame.maxX + 6
+        zoom.frame.origin.y = 4
+        zoom.isEnabled = false
+    }
+}
+
     func openSettings() {
-        hideDrop()
+        let keepDrop = settingsPage == "appear" || settingsPage == "drop"
+        if !keepDrop {
+            hideDrop()
+        }
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         if settingsWC == nil {
-            let vc = NSHostingController(rootView: SettingsRoot(app: self, prefs: prefs))
-            let w = NSWindow(contentViewController: vc)
+            let vc = NSHostingController(rootView: SettingsRoot(app: self, prefs: prefs, sampler: sampler))
+            let w = SettingsWindow(contentViewController: vc)
             w.title = "Sino"
             w.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
             w.titlebarAppearsTransparent = true
             w.titleVisibility = .hidden
             w.isReleasedWhenClosed = false
             w.acceptsMouseMovedEvents = true
-            w.minSize = NSSize(width: 600, height: 320)
-            w.maxSize = NSSize(width: 600, height: 1200)
-            w.setContentSize(NSSize(width: 600, height: 420))
+            w.isMovableByWindowBackground = true
+            w.backgroundColor = NSColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1.0)
+            w.minSize = NSSize(width: 640, height: 520)
+            w.maxSize = NSSize(width: 640, height: 1200)
+            w.setContentSize(NSSize(width: 640, height: 680))
             w.center()
             settingsWC = NSWindowController(window: w)
             NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
                 self?.settingsWC = nil
-                NSApp.setActivationPolicy(.accessory)
+                if self?.onboardingWC == nil {
+                    NSApp.setActivationPolicy(.accessory)
+                }
             }
         }
         settingsWC?.showWindow(nil)
         settingsWC?.window?.makeKeyAndOrderFront(nil)
         settingsWC?.window?.orderFrontRegardless()
+        if keepDrop {
+            DispatchQueue.main.async { [weak self] in
+                self?.showDrop()
+            }
+        }
+    }
+
+    func openOnboarding() {
+        hideDrop()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        if onboardingWC == nil {
+            let vc = NSHostingController(rootView: OnboardingView(app: self, prefs: prefs))
+            let w = NSWindow(contentViewController: vc)
+            w.title = "Welcome to Sino"
+            w.styleMask = [.titled, .closable, .fullSizeContentView]
+            w.titlebarAppearsTransparent = true
+            w.titleVisibility = .hidden
+            w.isReleasedWhenClosed = false
+            w.acceptsMouseMovedEvents = true
+            w.setContentSize(NSSize(width: 480, height: 430))
+            w.center()
+            onboardingWC = NSWindowController(window: w)
+            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
+                self?.prefs.setHasCompletedOnboarding(true)
+                self?.onboardingWC = nil
+                if self?.settingsWC == nil {
+                    NSApp.setActivationPolicy(.accessory)
+                }
+            }
+        }
+        onboardingWC?.showWindow(nil)
+        onboardingWC?.window?.makeKeyAndOrderFront(nil)
+        onboardingWC?.window?.orderFrontRegardless()
+    }
+
+    func closeOnboarding() {
+        prefs.setHasCompletedOnboarding(true)
+        onboardingWC?.close()
+        onboardingWC = nil
+        if settingsWC == nil {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 }
 
@@ -655,6 +1058,7 @@ final class CatcherView: NSView {
     }
     override func mouseDown(with event: NSEvent) { onDown?() }
     override func rightMouseDown(with event: NSEvent) { onDown?() }
+    override func otherMouseDown(with event: NSEvent) { onDown?() }
 }
 
 struct MenuChip: Equatable {
@@ -667,6 +1071,8 @@ struct MenuChip: Equatable {
 
 final class ExtraView: NSView {
     var chips: [MenuChip] = []
+    var flashColor: NSColor?
+    var flashAlpha: CGFloat = 0
     override var isOpaque: Bool { false }
     override var isFlipped: Bool { true }
 
@@ -719,14 +1125,23 @@ final class ExtraView: NSView {
     }
 
     var fittingWidth: CGFloat {
-        guard !chips.isEmpty else { return 40 }
-        return chips.map(chipWidth).reduce(0, +) + CGFloat(chips.count - 1) * gap + 2
+        guard !chips.isEmpty else { return 48 }
+        return chips.map(chipWidth).reduce(0, +) + CGFloat(chips.count - 1) * gap + 16
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        if flashAlpha > 0, let color = flashColor {
+            // Expanded rounded capsule highlight prolonged to the left
+            let selRect = NSRect(x: 0, y: 0.5, width: bounds.width - 2, height: bounds.height - 1)
+            let rad = min(selRect.width, selRect.height) / 2
+            let path = NSBezierPath(roundedRect: selRect, xRadius: rad, yRadius: rad)
+            color.withAlphaComponent(flashAlpha * 0.45).setFill()
+            path.fill()
+        }
+
         let labelH: CGFloat = 9
         let opts: NSString.DrawingOptions = [.usesLineFragmentOrigin]
-        var x: CGFloat = 2
+        var x: CGFloat = 8
         for c in chips {
             let cw = chipWidth(c)
             if let frac = c.batteryFrac {
@@ -831,6 +1246,10 @@ final class TooltipPanel: NSPanel {
     }
 
     func update(text: String, for view: NSView, in win: NSWindow) {
+        if parent != win {
+            parent?.removeChildWindow(self)
+            win.addChildWindow(self, ordered: .above)
+        }
         label.stringValue = text
         label.sizeToFit()
         let padX: CGFloat = 8
@@ -917,7 +1336,10 @@ final class TooltipManager {
         showTimer = nil
         hideTimer?.invalidate()
         hideTimer = nil
-        tipPanel?.orderOut(nil)
+        if let p = tipPanel {
+            p.parent?.removeChildWindow(p)
+            p.orderOut(nil)
+        }
         isShowing = false
         currentView = nil
     }
@@ -931,14 +1353,49 @@ final class TooltipManager {
     }
 }
 
+struct FanSlider: NSViewRepresentable {
+    var min: Double
+    var max: Double
+    var value: Double
+    var onChange: (Double) -> Void
+
+    final class Knob: NSSlider {
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    }
+    final class Coord: NSObject {
+        var onChange: (Double) -> Void = { _ in }
+        @objc func changed(_ s: NSSlider) { onChange(s.doubleValue) }
+    }
+    func makeCoordinator() -> Coord { Coord() }
+    func makeNSView(context: Context) -> NSSlider {
+        let s = Knob()
+        s.minValue = min
+        s.maxValue = max
+        s.doubleValue = value
+        s.isContinuous = true
+        s.controlSize = .small
+        s.target = context.coordinator
+        s.action = #selector(Coord.changed(_:))
+        context.coordinator.onChange = onChange
+        return s
+    }
+    func updateNSView(_ s: NSSlider, context: Context) {
+        context.coordinator.onChange = onChange
+        if abs(s.minValue - min) > 0.5 { s.minValue = min }
+        if abs(s.maxValue - max) > 0.5 { s.maxValue = max }
+        if abs(s.doubleValue - value) > 8 { s.doubleValue = value }
+    }
+}
+
 struct HoverPad: NSViewRepresentable {
     var tip: String? = nil
     var selected = false
     var captureHits = false
     var onClick: (() -> Void)? = nil
+    var radius: CGFloat = 6
     func makeNSView(context: Context) -> HoverBG {
         let v = HoverBG()
-        v.radius = 6
+        v.radius = radius
         v.selected = selected
         v.captureHits = captureHits
         v.onClick = onClick
@@ -946,6 +1403,7 @@ struct HoverPad: NSViewRepresentable {
         return v
     }
     func updateNSView(_ v: HoverBG, context: Context) {
+        v.radius = radius
         v.selected = selected
         v.captureHits = captureHits
         v.onClick = onClick
@@ -1039,6 +1497,7 @@ final class FrameProbe: NSView {
 
 struct Dashboard: View {
     @ObservedObject var app: App
+    @ObservedObject var prefs = Prefs.shared
     var mode: Kind = .main
     enum Kind { case main, detail }
     var snap: Snapshot { app.sampler.snap }
@@ -1053,6 +1512,8 @@ struct Dashboard: View {
             .padding(6)
         }
         .frame(width: 268)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .clipped()
         .background {
             ZStack {
                 Frost(material: app.prefs.frostMaterial, behind: app.prefs.frostBehind)
@@ -1093,6 +1554,26 @@ struct Dashboard: View {
                 let s = max(0, snap.cpuSystem)
                 CPULoadBar(user: u, system: s, accent: NSColor(pal.accent), track: NSColor(pal.track))
                     .frame(height: 8)
+            } headerTrailing: {
+                HStack(spacing: 6) {
+                    HStack(spacing: 2) {
+                        Text("MIN").foregroundStyle(.secondary.opacity(0.65))
+                        AnimatingIntText(value: snap.cpuMin * 100, font: .system(size: 8.5, weight: .semibold).monospacedDigit(), color: .secondary)
+                        Text("%").foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 2) {
+                        Text("AVG").foregroundStyle(.secondary.opacity(0.65))
+                        AnimatingIntText(value: snap.cpuAvg * 100, font: .system(size: 8.5, weight: .semibold).monospacedDigit(), color: .secondary)
+                        Text("%").foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 2) {
+                        Text("MAX").foregroundStyle(.secondary.opacity(0.65))
+                        AnimatingIntText(value: snap.cpuMax * 100, font: .system(size: 8.5, weight: .semibold).monospacedDigit(), color: .secondary)
+                        Text("%").foregroundStyle(.secondary)
+                    }
+                }
+                .animation(pal.anim, value: snap.cpuAvg)
+                .font(.system(size: 8.5, weight: .semibold).monospacedDigit())
             }
         case "ram":
             Card("RAM", "memorychip", pal, panel: .ram, active: app.panel == .ram) {
@@ -1144,7 +1625,7 @@ struct Dashboard: View {
                 }
             }
         case "net":
-            Card("NETWORK", snap.wifi ? "wifi" : "cable.connector", pal, panel: .net, active: app.panel == .net) {
+            Card("NETWORK", "network", pal, panel: .net, active: app.panel == .net) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(rate(snap.netOut)).font(.system(size: 15, weight: .semibold).monospacedDigit())
@@ -1158,11 +1639,6 @@ struct Dashboard: View {
                 }
                 NetChart(up: snap.netOutHistory, down: snap.netInHistory)
                     .frame(height: 36)
-                HStack {
-                    Image(systemName: snap.wifi ? "wifi" : "cable.connector").foregroundStyle(NetChart.downCol)
-                    Text(snap.netSSID != "—" ? snap.netSSID : snap.netName).font(Palette.body)
-                    Spacer()
-                }
             }
         case "fans":
             if !snap.fans.isEmpty {
@@ -1227,54 +1703,73 @@ struct Dashboard: View {
     func shown(_ id: String) -> Bool { app.prefs.drop.contains(id) }
 
     var sideColumn: some View {
-        VStack(spacing: 4) {
-            switch app.panel {
-            case .cpu:
-                ForEach(app.prefs.sideOrder["cpu"] ?? ["cores", "procs", "gpu"], id: \.self) { sec in
-                    if app.prefs.isSideVisible("cpu", sec) {
-                        cpuSection(sec)
+        ZStack(alignment: .top) {
+            Group {
+                switch app.panel {
+                case .cpu:
+                    VStack(spacing: 4) {
+                        ForEach(app.prefs.sideOrder["cpu"] ?? ["cores", "procs", "gpu"], id: \.self) { sec in
+                            if app.prefs.isSideVisible("cpu", sec) {
+                                cpuSection(sec)
+                            }
+                        }
                     }
-                }
-            case .ram:
-                ForEach(app.prefs.sideOrder["ram"] ?? ["memory", "procs"], id: \.self) { sec in
-                    if app.prefs.isSideVisible("ram", sec) {
-                        ramSection(sec)
+                case .ram:
+                    VStack(spacing: 4) {
+                        ForEach(app.prefs.sideOrder["ram"] ?? ["memory", "procs"], id: \.self) { sec in
+                            if app.prefs.isSideVisible("ram", sec) {
+                                ramSection(sec)
+                            }
+                        }
                     }
-                }
-            case .gpu:
-                ForEach(app.prefs.sideOrder["gpu"] ?? ["gpu"], id: \.self) { sec in
-                    if app.prefs.isSideVisible("gpu", sec) {
-                        gpuSection(sec)
+                case .gpu:
+                    VStack(spacing: 4) {
+                        ForEach(app.prefs.sideOrder["gpu"] ?? ["gpu"], id: \.self) { sec in
+                            if app.prefs.isSideVisible("gpu", sec) {
+                                gpuSection(sec)
+                            }
+                        }
                     }
-                }
-            case .storage:
-                ForEach(app.prefs.sideOrder["storage"] ?? ["activity", "volumes"], id: \.self) { sec in
-                    if app.prefs.isSideVisible("storage", sec) {
-                        storageSection(sec)
+                case .storage:
+                    VStack(spacing: 4) {
+                        ForEach(app.prefs.sideOrder["storage"] ?? ["activity", "volumes"], id: \.self) { sec in
+                            if app.prefs.isSideVisible("storage", sec) {
+                                storageSection(sec)
+                            }
+                        }
                     }
-                }
-            case .net:
-                ForEach(app.prefs.sideOrder["net"] ?? ["chart", "wifi", "addresses", "topProc"], id: \.self) { sec in
-                    if app.prefs.isSideVisible("net", sec) {
-                        netSection(sec)
+                case .net:
+                    VStack(spacing: 4) {
+                        ForEach(app.prefs.sideOrder["net"] ?? ["chart", "wifi", "addresses", "topProc"], id: \.self) { sec in
+                            if app.prefs.isSideVisible("net", sec) {
+                                netSection(sec)
+                            }
+                        }
                     }
-                }
-            case .fans:
-                ForEach(app.prefs.sideOrder["fans"] ?? ["fans", "sensors"], id: \.self) { sec in
-                    if app.prefs.isSideVisible("fans", sec) {
-                        fansSection(sec)
+                case .fans:
+                    VStack(spacing: 4) {
+                        ForEach(app.prefs.sideOrder["fans"] ?? ["fans", "sensors"], id: \.self) { sec in
+                            if app.prefs.isSideVisible("fans", sec) {
+                                fansSection(sec)
+                            }
+                        }
                     }
-                }
-            case .battery:
-                ForEach(app.prefs.sideOrder["battery"] ?? ["battery", "energy"], id: \.self) { sec in
-                    if app.prefs.isSideVisible("battery", sec) {
-                        batterySection(sec)
+                case .battery:
+                    VStack(spacing: 4) {
+                        ForEach(app.prefs.sideOrder["battery"] ?? ["battery", "energy"], id: \.self) { sec in
+                            if app.prefs.isSideVisible("battery", sec) {
+                                batterySection(sec)
+                            }
+                        }
                     }
+                case nil: EmptyView()
                 }
-            case nil: EmptyView()
             }
+            .id(app.panel)
+            .transition(.opacity)
         }
         .frame(width: 256)
+        .animation(.easeOut(duration: 0.11), value: app.panel)
         .contentShape(Rectangle())
     }
 
@@ -1323,24 +1818,48 @@ struct Dashboard: View {
             }
         case "procs":
             Card("CPU USAGE", "square.grid.2x2", pal) {
-                ForEach(snap.processes) { p in
-                    HStack(spacing: 5) {
-                        icon(p.icon)
-                        HStack(spacing: 4) {
-                            Text(p.name).font(Palette.body).lineLimit(1)
-                            if p.count > 1 {
-                                Text("\(p.count)")
-                                    .font(.system(size: 8.5, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 0.5)
-                                    .background(pal.track, in: Capsule())
+                let count = app.prefs.cpuProcCount
+                let procs = Array(snap.processes.prefix(count))
+                VStack(spacing: 4) {
+                    ForEach(procs) { p in
+                        HStack(spacing: 5) {
+                            icon(p.icon)
+                            HStack(spacing: 4) {
+                                Text(p.name).font(Palette.body).lineLimit(1)
+                                if p.count > 1 {
+                                    Text("\(p.count)")
+                                        .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 0.5)
+                                        .background(pal.track, in: Capsule())
+                                }
                             }
+                            Spacer()
+                            let cpuVal = app.prefs.cpuProcMode == "perCore" ? p.cpu : (p.cpu / Double(app.sampler.totalCores))
+                            AnimatingPct1Text(
+                                value: cpuVal,
+                                font: Palette.body.monospacedDigit(),
+                                color: .secondary
+                            )
+                            .animation(pal.anim, value: cpuVal)
                         }
-                        Spacer()
-                        Text(pct1(p.cpu)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
+                        .frame(height: 18)
+                        .transition(.opacity)
+                    }
+                    if procs.count < count {
+                        ForEach(0..<(count - procs.count), id: \.self) { _ in
+                            HStack(spacing: 5) {
+                                Color.clear.frame(width: 14, height: 14)
+                                Text("—").font(Palette.body).foregroundStyle(.tertiary)
+                                Spacer()
+                                Text("—").font(Palette.body.monospacedDigit()).foregroundStyle(.tertiary)
+                            }
+                            .frame(height: 18)
+                        }
                     }
                 }
+                .animation(pal.snappyAnim, value: procs.map(\.id))
             }
         case "gpu":
             Card("GPU", "display", pal) {
@@ -1440,30 +1959,54 @@ struct Dashboard: View {
                         .background(pal.track.opacity(0.8), in: Capsule())
                     }
                     .buttonStyle(.plain)
-                    .help("Quick RAM Clean (evacuate purgeable caches)")
+                    .overlay { HoverPad(tip: "Quick RAM Clean (evacuate purgeable caches)", radius: 12) }
                 }
             }
         case "procs":
             Card("PROCESSES", "square.grid.2x2", pal) {
-                ForEach(snap.memProcesses.prefix(app.prefs.ramProcCount)) { p in
-                    HStack(spacing: 5) {
-                        icon(p.icon)
-                        HStack(spacing: 4) {
-                            Text(p.name).font(Palette.body).lineLimit(1)
-                            if p.count > 1 {
-                                Text("\(p.count)")
-                                    .font(.system(size: 8.5, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 0.5)
-                                    .background(pal.track, in: Capsule())
+                let count = app.prefs.ramProcCount
+                let procs = Array(snap.memProcesses.prefix(count))
+                VStack(spacing: 4) {
+                    ForEach(procs) { p in
+                        HStack(spacing: 5) {
+                            icon(p.icon)
+                            HStack(spacing: 4) {
+                                Text(p.name).font(Palette.body).lineLimit(1)
+                                if p.count > 1 {
+                                    Text("\(p.count)")
+                                        .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 0.5)
+                                        .background(pal.track, in: Capsule())
+                                }
                             }
+                            Spacer()
+                            AnimatingGBText(
+                                bytes: Double(p.mem),
+                                font: Palette.body.monospacedDigit(),
+                                color: .secondary
+                            )
+                            .animation(pal.anim, value: p.mem)
+                            ProcessKillButton(process: p, app: app, pal: pal)
                         }
-                        Spacer()
-                        Text(bytesGB(p.mem)).font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
-                        ProcessKillButton(process: p, app: app, pal: pal)
+                        .frame(height: 18)
+                        .transition(.opacity)
+                    }
+                    if procs.count < count {
+                        ForEach(0..<(count - procs.count), id: \.self) { _ in
+                            HStack(spacing: 5) {
+                                Color.clear.frame(width: 14, height: 14)
+                                Text("—").font(Palette.body).foregroundStyle(.tertiary)
+                                Spacer()
+                                Text("—").font(Palette.body.monospacedDigit()).foregroundStyle(.tertiary)
+                                Color.clear.frame(width: 18, height: 18)
+                            }
+                            .frame(height: 18)
+                        }
                     }
                 }
+                .animation(pal.snappyAnim, value: procs.map(\.id))
             }
         default:
             EmptyView()
@@ -1558,7 +2101,7 @@ struct Dashboard: View {
     func netSection(_ sec: String) -> some View {
         switch sec {
         case "chart":
-            Card("NETWORK", snap.wifi ? "wifi" : "cable.connector", pal) {
+            Card("NETWORK", "network", pal) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(rate(snap.netOut)).font(.system(size: 15, weight: .semibold).monospacedDigit())
@@ -1581,16 +2124,10 @@ struct Dashboard: View {
                     Text("Peak ↓").font(Palette.tiny).foregroundStyle(.secondary)
                     Text(rate(snap.netInPeak)).font(Palette.tiny.monospacedDigit())
                 }
-                HStack {
-                    Image(systemName: snap.wifi ? "wifi" : "cable.connector").foregroundStyle(NetChart.downCol)
-                    Text(snap.netSSID != "—" ? snap.netSSID : snap.netName).font(Palette.body)
-                    Spacer()
-                    Text(snap.netInterface).font(Palette.tiny.monospaced()).foregroundStyle(.secondary)
-                }
             }
         case "wifi":
             if snap.wifi {
-                Card("WI-FI DETAILS", "wifi.badge.checkmark", pal) {
+                Card("WI-FI DETAILS", "wifi", pal) {
                     if snap.netSSID != "—" {
                         GeoInfoRow(icon: "network", title: "Network Name", value: snap.netSSID)
                     }
@@ -1610,7 +2147,7 @@ struct Dashboard: View {
                     if snap.netTxRate > 0 {
                         GeoInfoRow(icon: "arrow.up.right.circle", title: "Transmit Rate", value: "\(Int(round(snap.netTxRate))) Mbps")
                     }
-                    GeoInfoRow(icon: "cable.connector.horizontal", title: "Interface", value: snap.netInterface)
+                    GeoInfoRow(icon: "cable.connector", title: "Interface", value: snap.netInterface)
                 }
             }
         case "addresses":
@@ -1678,23 +2215,77 @@ struct Dashboard: View {
         }
     }
 
+    var fanLo: Double {
+        let v = snap.fans.map(\.minRPM).min() ?? 2317
+        return v > 500 ? v : 2317
+    }
+    var fanHi: Double {
+        let v = snap.fans.map(\.maxRPM).max() ?? 6800
+        return v > fanLo ? v : 6800
+    }
+
+    func fanModeChip(_ title: String, _ mode: FanMode) -> some View {
+        Text(title)
+            .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+            .foregroundStyle(app.fanMode == mode ? pal.accent : .secondary)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(app.fanMode == mode ? pal.accent.opacity(0.18) : pal.track.opacity(0.8), in: Capsule())
+            .overlay {
+                HoverPad(captureHits: true, onClick: {
+                    app.setFanMode(mode)
+                })
+            }
+    }
+
     @ViewBuilder
     func fansSection(_ sec: String) -> some View {
         switch sec {
         case "fans":
             Card("FANS", "fan", pal) {
-                Sparkline(values: snap.fanHistory, color: pal.accent)
-                    .frame(height: 38)
-                    .padding(.bottom, 2)
-                ForEach(snap.fans) { f in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(f.name).font(Palette.body)
-                            Spacer()
-                            Text("\(Int(f.rpm.rounded())) RPM").font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
+                if app.fanMode == .curve {
+                    Text(String(format: "Hottest %.0f °C → %.0f RPM", app.hottestTemp(), app.curveTarget()))
+                        .font(Palette.tiny)
+                        .foregroundStyle(.secondary)
+                    FanCurveEditor(
+                        points: prefs.fanCurve,
+                        rpmLo: fanLo,
+                        rpmHi: fanHi,
+                        nowTemp: app.hottestTemp(),
+                        nowRPM: app.curveTarget(),
+                        dark: app.currentScheme == .dark,
+                        onChange: { i, t, r in prefs.setCurvePoint(i, temp: t, rpm: r) }
+                    )
+                    .frame(height: 132)
+                } else {
+                    Sparkline(values: snap.fanHistory, color: pal.accent)
+                        .frame(height: 38)
+                        .padding(.bottom, 2)
+                    ForEach(snap.fans) { f in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(f.name).font(Palette.body)
+                                Spacer()
+                                Text("\(Int(f.rpm.rounded())) RPM").font(Palette.body.monospacedDigit()).foregroundStyle(.secondary)
+                            }
+                            if app.fanMode == .manual {
+                                FanSlider(
+                                    min: f.minRPM > 500 ? f.minRPM : fanLo,
+                                    max: f.maxRPM > fanLo ? f.maxRPM : fanHi,
+                                    value: app.fanTargets[f.id] ?? f.rpm
+                                ) { app.setFanTarget(f.id, $0) }
+                                    .frame(height: 18)
+                            } else {
+                                Bar(f.maxRPM > 0 ? min(1, f.rpm / f.maxRPM) : 0, pal.accent, pal.track)
+                            }
                         }
-                        Bar(f.maxRPM > 0 ? min(1, f.rpm / f.maxRPM) : 0, pal.accent, pal.track)
                     }
+                }
+            } headerTrailing: {
+                HStack(spacing: 3) {
+                    fanModeChip("Auto", .auto)
+                    fanModeChip("Manual", .manual)
+                    fanModeChip("Curve", .curve)
                 }
             }
         case "sensors":
@@ -1757,7 +2348,7 @@ struct Dashboard: View {
                         charging: snap.charging,
                         accent: pal.accent
                     )
-                    .frame(height: 84)
+                    .frame(height: 92)
                     .padding(.top, 2)
                 }
             }
@@ -1816,8 +2407,7 @@ struct Dashboard: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 20)
                 .background(pal.track, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .overlay { HoverPad(tip: "Refresh interval — click to cycle", captureHits: true, onClick: { App.shared.cycleInterval() }) }
-                .help("Refresh interval — click to cycle")
+                .overlay { HoverPad(tip: "Refresh: \(intervalLabel) — click to cycle", captureHits: true, onClick: { App.shared.cycleInterval() }) }
                 .accessibilityAddTraits(.isButton)
         case "theme":
             tool(themeIcon, "Theme") { App.shared.cycleTheme() }
@@ -1835,7 +2425,7 @@ struct Dashboard: View {
     }
 
     func customTool(_ slot: Int) -> some View {
-        let path = slot == 3 ? app.prefs.customApp3 : (slot == 2 ? app.prefs.customApp2 : app.prefs.customApp)
+        let path = app.prefs.customAppPath(slot: slot)
         let tip = path.isEmpty ? "Set toolbar app" : app.prefs.customAppName(slot: slot)
         return Group {
             if let img = app.prefs.customAppIcon(slot: slot) {
@@ -1850,7 +2440,6 @@ struct Dashboard: View {
         .frame(height: 20)
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(pal.track))
         .overlay { HoverPad(tip: tip, captureHits: true, onClick: { App.shared.openCustomApp(slot: slot) }) }
-        .help(tip)
         .accessibilityAddTraits(.isButton)
         .contextMenu {
             Button("Choose App…") {
@@ -1880,14 +2469,15 @@ struct Dashboard: View {
         let active = app.isAwakeActive
         let tip: String
         if active {
+            let mode = app.prefs.preventLidSleep ? " (clamshell)" : ""
             if let rem = app.awakeRemainingSeconds {
                 let h = rem / 3600
                 let m = (rem % 3600) / 60
                 let s = rem % 60
                 let tStr = h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%02d:%02d", m, s)
-                tip = "Awake: \(tStr) remaining (right-click options)"
+                tip = "Awake\(mode): \(tStr) remaining (right-click options)"
             } else {
-                tip = "Awake: Indefinite (right-click options)"
+                tip = "Awake\(mode): Indefinite (right-click options)"
             }
         } else {
             tip = "Prevent Sleep (right-click for timer / options)"
@@ -1906,7 +2496,6 @@ struct Dashboard: View {
                     app.toggleAwake()
                 })
             }
-            .help(tip)
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel("Awake mode")
             .contextMenu {
@@ -1933,6 +2522,10 @@ struct Dashboard: View {
                     get: { app.preventDisplaySleep },
                     set: { app.setPreventDisplaySleep($0) }
                 ))
+                Toggle("Prevent Lid-Close Sleep", isOn: Binding(
+                    get: { app.prefs.preventLidSleep },
+                    set: { app.setPreventLidSleep($0) }
+                ))
             }
     }
 
@@ -1947,7 +2540,6 @@ struct Dashboard: View {
                     .fill(selected ? pal.accent.opacity(0.12) : pal.track)
             )
             .overlay { HoverPad(tip: tip, selected: selected, captureHits: true, onClick: action) }
-            .help(tip)
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel(tip)
     }
@@ -1986,6 +2578,28 @@ struct GeoInfoRow: View {
     }
 }
 
+final class TrackKillView: NSView {
+    var onAttach: ((NSView) -> Void)?
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            onAttach?(self)
+        }
+    }
+}
+
+struct TrackKillRepresentable: NSViewRepresentable {
+    let onAttach: (NSView) -> Void
+    func makeNSView(context: Context) -> TrackKillView {
+        let v = TrackKillView()
+        v.onAttach = onAttach
+        return v
+    }
+    func updateNSView(_ nsView: TrackKillView, context: Context) {
+        nsView.onAttach = onAttach
+    }
+}
+
 struct ProcessKillButton: View {
     let process: ProcSample
     @ObservedObject var app: App
@@ -2000,6 +2614,7 @@ struct ProcessKillButton: View {
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 if isConfirming {
                     app.confirmingKillPid = nil
+                    app.activeKillButton = nil
                     app.quitPids(process.pids.isEmpty ? [process.id] : process.pids)
                 } else {
                     app.confirmingKillPid = process.id
@@ -2022,6 +2637,13 @@ struct ProcessKillButton: View {
             .background(
                 isConfirming ? Color.red : Color.clear,
                 in: Capsule()
+            )
+            .background(
+                TrackKillRepresentable { v in
+                    if isConfirming {
+                        app.activeKillButton = v
+                    }
+                }
             )
         }
         .buttonStyle(.plain)
@@ -2097,6 +2719,91 @@ struct Card<Content: View, HeaderTrailing: View>: View {
     }
 }
 
+struct AnimatingIntText: View, Animatable {
+    var value: Double
+    var font: Font
+    var color: Color
+
+    var animatableData: Double {
+        get { value }
+        set { value = newValue }
+    }
+
+    var body: some View {
+        Text("\(Int(round(value)))")
+            .font(font)
+            .foregroundStyle(color)
+    }
+}
+
+struct AnimatingPctText: View, Animatable {
+    var value: Double
+    var font: Font
+    var color: Color
+
+    var animatableData: Double {
+        get { value }
+        set { value = newValue }
+    }
+
+    var body: some View {
+        Text(String(format: "%.1f %%", value * 100))
+            .font(font)
+            .foregroundStyle(color)
+    }
+}
+
+struct AnimatingBytesGBText: View, Animatable {
+    var bytes: Double
+    var font: Font
+    var color: Color
+
+    var animatableData: Double {
+        get { bytes }
+        set { bytes = newValue }
+    }
+
+    var body: some View {
+        Text(bytesGB(UInt64(max(0, bytes))))
+            .font(font)
+            .foregroundStyle(color)
+    }
+}
+
+struct AnimatingPct1Text: View, Animatable {
+    var value: Double
+    var font: Font
+    var color: Color
+
+    var animatableData: Double {
+        get { value }
+        set { value = newValue }
+    }
+
+    var body: some View {
+        Text(pct1(value))
+            .font(font)
+            .foregroundStyle(color)
+    }
+}
+
+struct AnimatingGBText: View, Animatable {
+    var bytes: Double
+    var font: Font
+    var color: Color
+
+    var animatableData: Double {
+        get { bytes }
+        set { bytes = newValue }
+    }
+
+    var body: some View {
+        Text(bytesGB(UInt64(max(0, bytes))))
+            .font(font)
+            .foregroundStyle(color)
+    }
+}
+
 struct CoreGaugeCell: View {
     let core: CoreSample
     let accent: Color
@@ -2122,10 +2829,14 @@ struct CoreGaugeCell: View {
                     .trim(from: 0, to: CGFloat(min(1, max(0.001, core.usage))))
                     .stroke(accent, style: StrokeStyle(lineWidth: 2.8, lineCap: .round))
                     .rotationEffect(.degrees(-90))
+                    .animation(Prefs.shared.animations ? .spring(response: 0.18, dampingFraction: 0.85) : nil, value: core.usage)
 
-                Text(String(format: "%.0f", core.usage * 100))
-                    .font(.system(size: 9.5, weight: .bold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.primary)
+                AnimatingIntText(
+                    value: core.usage * 100,
+                    font: .system(size: 9.5, weight: .bold, design: .rounded).monospacedDigit(),
+                    color: .primary
+                )
+                .animation(Prefs.shared.animations ? .spring(response: 0.18, dampingFraction: 0.85) : nil, value: core.usage)
             }
             .frame(width: 32, height: 32)
 
@@ -2165,49 +2876,26 @@ struct Bar: View {
         self.frac = frac; self.fill = fill; self.track = track; self.charging = charging
     }
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.016, paused: !charging)) { tl in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !charging)) { tl in
             let t = tl.date.timeIntervalSinceReferenceDate
-            let cycle = 2.4
-            // primary shimmer: 2.4s calm sweep
-            let phase1 = CGFloat(t.truncatingRemainder(dividingBy: cycle) / cycle)
-            // secondary shimmer: offset by half period
-            let phase2 = CGFloat((t + cycle * 0.5).truncatingRemainder(dividingBy: cycle) / cycle)
-            let center1 = -0.30 + phase1 * 1.60
-            let center2 = -0.30 + phase2 * 1.60
-            // glow pulse: calm 2.4s breathe
-            let glow = charging ? CGFloat(0.5 + 0.5 * sin(t * .pi * 2.0 / cycle)) : 0
+            let p = charging ? CGFloat(t.truncatingRemainder(dividingBy: 2.2) / 2.2) : 0
+            let stops: [Gradient.Stop] = (0...128).map { i in
+                let u = CGFloat(i) / 128
+                let s = 0.5 + 0.5 * sin((u * 0.6 - p) * 2 * CGFloat.pi)
+                return .init(color: Color.white.opacity(0.08 + 0.22 * s), location: u)
+            }
             GeometryReader { g in
                 let filled = max(0, g.size.width * CGFloat(min(1, max(0, frac))))
                 ZStack(alignment: .leading) {
                     Capsule().fill(track)
-                    // glow backing when charging
-                    if charging && filled > 0 {
-                        Capsule()
-                            .fill(fill.opacity(0.25 * glow))
-                            .frame(width: filled)
-                            .blur(radius: 3)
-                    }
                     Capsule().fill(fill).frame(width: filled)
-                    // primary & secondary seamless shimmer
+                        .animation(Prefs.shared.animations ? .spring(response: 0.18, dampingFraction: 0.85) : nil, value: filled)
                     if charging && filled > 0 {
-                        let hw1: CGFloat = 0.22
                         Capsule()
-                            .fill(LinearGradient(stops: [
-                                .init(color: .clear, location: center1 - hw1),
-                                .init(color: Color.white.opacity(0.55), location: center1),
-                                .init(color: .clear, location: center1 + hw1),
-                            ], startPoint: .leading, endPoint: .trailing))
+                            .fill(LinearGradient(stops: stops, startPoint: .leading, endPoint: .trailing))
                             .frame(width: filled)
                             .blendMode(.plusLighter)
-                        let hw2: CGFloat = 0.25
-                        Capsule()
-                            .fill(LinearGradient(stops: [
-                                .init(color: .clear, location: center2 - hw2),
-                                .init(color: Color.white.opacity(0.25), location: center2),
-                                .init(color: .clear, location: center2 + hw2),
-                            ], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: filled)
-                            .blendMode(.plusLighter)
+                            .animation(Prefs.shared.animations ? .spring(response: 0.18, dampingFraction: 0.85) : nil, value: filled)
                     }
                 }
             }
@@ -2240,12 +2928,61 @@ struct CPULoadBar: NSViewRepresentable {
 }
 
 final class CPULoadView: NSView {
-    var user = 0.0
-    var system = 0.0
+    var user = 0.0 {
+        didSet {
+            targetUser = user
+            startAnimationIfNeeded()
+        }
+    }
+    var system = 0.0 {
+        didSet {
+            targetSystem = system
+            startAnimationIfNeeded()
+        }
+    }
     var accent = NSColor.systemBlue
     var track = NSColor.white.withAlphaComponent(0.12)
     var frost = NSVisualEffectView.Material.hudWindow
     var stroke = NSColor.labelColor.withAlphaComponent(0.22)
+
+    private var curUser = 0.0
+    private var curSystem = 0.0
+    private var targetUser = 0.0
+    private var targetSystem = 0.0
+    private var animTimer: Timer?
+
+    private func startAnimationIfNeeded() {
+        if !Prefs.shared.animations {
+            curUser = targetUser
+            curSystem = targetSystem
+            needsDisplay = true
+            return
+        }
+        if animTimer != nil { return }
+        if curUser == 0 && curSystem == 0 {
+            curUser = targetUser
+            curSystem = targetSystem
+            needsDisplay = true
+            return
+        }
+        animTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] t in
+            guard let self = self else { t.invalidate(); return }
+            let du = (self.targetUser - self.curUser) * 0.45
+            let ds = (self.targetSystem - self.curSystem) * 0.45
+            self.curUser += du
+            self.curSystem += ds
+            if abs(self.targetUser - self.curUser) < 0.001 && abs(self.targetSystem - self.curSystem) < 0.001 {
+                self.curUser = self.targetUser
+                self.curSystem = self.targetSystem
+                self.animTimer?.invalidate()
+                self.animTimer = nil
+            }
+            self.needsDisplay = true
+        }
+        if let animTimer {
+            RunLoop.main.add(animTimer, forMode: .common)
+        }
+    }
     private var hover = 0 { didSet { if oldValue != hover { needsDisplay = true; updateTip() } } }
     private var tip: NSPanel?
     private let tipFrost: NSVisualEffectView = {
@@ -2309,7 +3046,10 @@ final class CPULoadView: NSView {
         return 3
     }
     private func hideTip() {
-        tip?.orderOut(nil)
+        if let p = tip {
+            p.parent?.removeChildWindow(p)
+            p.orderOut(nil)
+        }
     }
     private func updateTip() {
         guard hover != 0, let win = window else { hideTip(); return }
@@ -2347,6 +3087,7 @@ final class CPULoadView: NSView {
             p.isFloatingPanel = true
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
             p.contentView = tipFrost
+            win.addChildWindow(p, ordered: .above)
             tip = p
         }
         tipFrost.frame = NSRect(origin: .zero, size: sz)
@@ -2374,8 +3115,8 @@ final class CPULoadView: NSView {
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(roundedRect: r, xRadius: rad, yRadius: rad).addClip()
         track.setFill(); r.fill()
-        let u = CGFloat(min(1, max(0, user))) * r.width
-        let s = CGFloat(min(1, max(0, system))) * r.width
+        let u = CGFloat(min(1, max(0, curUser))) * r.width
+        let s = CGFloat(min(1, max(0, curSystem))) * r.width
         accent.withAlphaComponent(0.45).setFill()
         NSRect(x: r.minX, y: r.minY, width: u + s, height: r.height).fill()
         accent.setFill()
@@ -2395,58 +3136,231 @@ final class CPULoadView: NSView {
     }
 }
 
-struct Sparkline: View {
+final class SparklineNSView: NSView {
+    var values: [Double] = [] {
+        didSet {
+            targetValues = values
+            if currentValues.count != values.count {
+                currentValues = values
+                needsDisplay = true
+            } else {
+                startAnimationIfNeeded()
+            }
+        }
+    }
+    var color: NSColor = .systemBlue { didSet { needsDisplay = true } }
+
+    private var currentValues: [Double] = []
+    private var targetValues: [Double] = []
+    private var animTimer: Timer?
+
+    override var isOpaque: Bool { false }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            animTimer?.invalidate()
+            animTimer = nil
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    deinit {
+        animTimer?.invalidate()
+    }
+
+    private func startAnimationIfNeeded() {
+        if !Prefs.shared.animations {
+            currentValues = targetValues
+            needsDisplay = true
+            return
+        }
+        if animTimer != nil { return }
+        animTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] t in
+            guard let self = self else { t.invalidate(); return }
+            var changed = false
+            for i in 0..<self.currentValues.count {
+                let diff = self.targetValues[i] - self.currentValues[i]
+                if abs(diff) > 0.001 {
+                    self.currentValues[i] += diff * 0.45
+                    changed = true
+                } else {
+                    self.currentValues[i] = self.targetValues[i]
+                }
+            }
+            if !changed {
+                self.animTimer?.invalidate()
+                self.animTimer = nil
+            }
+            self.needsDisplay = true
+        }
+        if let animTimer {
+            RunLoop.main.add(animTimer, forMode: .common)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !currentValues.isEmpty else { return }
+        let n = max(currentValues.count, 1)
+        let w = bounds.width / CGFloat(n)
+        let bw = max(1.2, w * 0.62)
+        color.setFill()
+        for (i, v) in currentValues.enumerated() {
+            let h = max(1, CGFloat(min(1, max(0, v))) * bounds.height)
+            let r = NSRect(x: CGFloat(i) * w, y: bounds.minY, width: bw, height: h)
+            let path = NSBezierPath(roundedRect: r, xRadius: 1, yRadius: 1)
+            path.fill()
+        }
+    }
+}
+
+struct Sparkline: NSViewRepresentable {
     let values: [Double]
     let color: Color
-    var body: some View {
-        Canvas { ctx, size in
-            let n = max(values.count, 1)
-            let w = size.width / CGFloat(n)
-            let bw = max(1.2, w * 0.62)
-            for (i, v) in values.enumerated() {
-                let h = max(1, CGFloat(v) * size.height)
-                let r = CGRect(x: CGFloat(i) * w, y: size.height - h, width: bw, height: h)
-                ctx.fill(Path(roundedRect: r, cornerRadius: 1), with: .color(color))
+
+    func makeNSView(context: Context) -> SparklineNSView {
+        let v = SparklineNSView()
+        v.values = values
+        v.color = NSColor(color)
+        return v
+    }
+
+    func updateNSView(_ nsView: SparklineNSView, context: Context) {
+        nsView.values = values
+        nsView.color = NSColor(color)
+    }
+}
+
+final class NetChartNSView: NSView {
+    var up: [Double] = [] {
+        didSet {
+            targetUp = up
+            if curUp.count != up.count { curUp = up; needsDisplay = true }
+            else { startAnimationIfNeeded() }
+        }
+    }
+    var down: [Double] = [] {
+        didSet {
+            targetDown = down
+            if curDown.count != down.count { curDown = down; needsDisplay = true }
+            else { startAnimationIfNeeded() }
+        }
+    }
+
+    private var curUp: [Double] = []
+    private var curDown: [Double] = []
+    private var targetUp: [Double] = []
+    private var targetDown: [Double] = []
+    private var animTimer: Timer?
+
+    private static let upNSCol = NSColor(srgbRed: 1.0, green: 0.38, blue: 0.38, alpha: 1.0)
+    private static let downNSCol = NSColor(srgbRed: 0.35, green: 0.80, blue: 0.95, alpha: 1.0)
+
+    override var isOpaque: Bool { false }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            animTimer?.invalidate()
+            animTimer = nil
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    deinit {
+        animTimer?.invalidate()
+    }
+
+    private func startAnimationIfNeeded() {
+        if !Prefs.shared.animations {
+            curUp = targetUp
+            curDown = targetDown
+            needsDisplay = true
+            return
+        }
+        if animTimer != nil { return }
+        animTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] t in
+            guard let self = self else { t.invalidate(); return }
+            var changed = false
+            for i in 0..<self.curUp.count {
+                let diff = self.targetUp[i] - self.curUp[i]
+                if abs(diff) > max(0.001, abs(self.targetUp[i]) * 0.001) {
+                    self.curUp[i] += diff * 0.45
+                    changed = true
+                } else {
+                    self.curUp[i] = self.targetUp[i]
+                }
+            }
+            for i in 0..<self.curDown.count {
+                let diff = self.targetDown[i] - self.curDown[i]
+                if abs(diff) > max(0.001, abs(self.targetDown[i]) * 0.001) {
+                    self.curDown[i] += diff * 0.45
+                    changed = true
+                } else {
+                    self.curDown[i] = self.targetDown[i]
+                }
+            }
+            if !changed {
+                self.animTimer?.invalidate()
+                self.animTimer = nil
+            }
+            self.needsDisplay = true
+        }
+        if let animTimer {
+            RunLoop.main.add(animTimer, forMode: .common)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let n = max(curUp.count, max(curDown.count, 1))
+        let w = bounds.width / CGFloat(n)
+        let bw = max(1.2, w * 0.62)
+        var peak = 1.0
+        for i in 0..<n {
+            if i < curUp.count { peak = max(peak, curUp[i]) }
+            if i < curDown.count { peak = max(peak, curDown[i]) }
+        }
+        let mid = bounds.height / 2
+
+        NSColor.secondaryLabelColor.withAlphaComponent(0.45).setFill()
+        var x: CGFloat = bounds.minX
+        while x < bounds.maxX {
+            NSRect(x: x, y: mid - 0.4, width: 2.4, height: 0.8).fill()
+            x += 5
+        }
+
+        for i in 0..<n {
+            let u = i < curUp.count ? curUp[i] : 0
+            let d = i < curDown.count ? curDown[i] : 0
+            let px = bounds.minX + CGFloat(i) * w
+            let uh = CGFloat(u / peak) * (mid - 1)
+            let dh = CGFloat(d / peak) * (mid - 1)
+            if uh > 0.4 {
+                Self.upNSCol.setFill()
+                NSBezierPath(roundedRect: NSRect(x: px, y: mid, width: bw, height: uh), xRadius: 0.8, yRadius: 0.8).fill()
+            }
+            if dh > 0.4 {
+                Self.downNSCol.setFill()
+                NSBezierPath(roundedRect: NSRect(x: px, y: mid - dh, width: bw, height: dh), xRadius: 0.8, yRadius: 0.8).fill()
             }
         }
     }
 }
 
-struct NetChart: View {
+struct NetChart: NSViewRepresentable {
     let up: [Double]
     let down: [Double]
     static let upCol = Color(red: 1.0, green: 0.38, blue: 0.38)
     static let downCol = Color(red: 0.35, green: 0.80, blue: 0.95)
-    var body: some View {
-        Canvas { ctx, size in
-            let n = max(up.count, down.count, 1)
-            let w = size.width / CGFloat(n)
-            let bw = max(1.2, w * 0.62)
-            var peak = 1.0
-            for i in 0..<n {
-                if i < up.count { peak = max(peak, up[i]) }
-                if i < down.count { peak = max(peak, down[i]) }
-            }
-            let mid = size.height / 2
-            var x: CGFloat = 0
-            while x < size.width {
-                ctx.fill(Path(CGRect(x: x, y: mid - 0.4, width: 2.4, height: 0.8)), with: .color(.secondary.opacity(0.45)))
-                x += 5
-            }
-            for i in 0..<n {
-                let u = i < up.count ? up[i] : 0
-                let d = i < down.count ? down[i] : 0
-                let px = CGFloat(i) * w
-                let uh = CGFloat(u / peak) * (mid - 1)
-                let dh = CGFloat(d / peak) * (mid - 1)
-                if uh > 0.4 {
-                    ctx.fill(Path(roundedRect: CGRect(x: px, y: mid - uh, width: bw, height: uh), cornerRadius: 0.8), with: .color(Self.upCol))
-                }
-                if dh > 0.4 {
-                    ctx.fill(Path(roundedRect: CGRect(x: px, y: mid, width: bw, height: dh), cornerRadius: 0.8), with: .color(Self.downCol))
-                }
-            }
-        }
+
+    func makeNSView(context: Context) -> NetChartNSView {
+        let v = NetChartNSView()
+        v.up = up
+        v.down = down
+        return v
+    }
+
+    func updateNSView(_ nsView: NetChartNSView, context: Context) {
+        nsView.up = up
+        nsView.down = down
     }
 }
 
@@ -2473,6 +3387,12 @@ struct Palette {
     }
     var green: Color {
         prefs.swiftColor("green", fallback: NSColor(srgbRed: 0.40, green: 0.78, blue: 0.35, alpha: 1))
+    }
+    var anim: Animation? {
+        prefs.animations ? .spring(response: 0.18, dampingFraction: 0.85) : nil
+    }
+    var snappyAnim: Animation? {
+        prefs.animations ? .snappy(duration: 0.20, extraBounce: 0.05) : nil
     }
     static let body = Font.system(size: 12)
     static let tiny = Font.system(size: 10)
@@ -2522,6 +3442,10 @@ private func formatMinutes(_ m: Int) -> String {
     return String(format: "%dm", mins)
 }
 
+private func pct(_ v: Double) -> String {
+    "\(Int((min(1, max(0, v)) * 100).rounded()))%"
+}
+
 private func pct0(_ v: Double) -> String {
     (pctFormatter.string(from: NSNumber(value: (v * 100).rounded())) ?? "0") + " %"
 }
@@ -2550,6 +3474,32 @@ private func shortRate(_ bps: Double) -> String {
 }
 // MARK: - Power Sankey
 
+final class SankeyInterpolator {
+    static let shared = SankeyInterpolator()
+    var dispSourceW: Double = 0
+    var dispSysW: Double = 0
+    var dispChargeW: Double = 0
+    private var lastTime: CFTimeInterval = 0
+
+    func update(targetSource: Double, targetSys: Double, targetCharge: Double) -> (Double, Double, Double) {
+        let now = CACurrentMediaTime()
+        if lastTime == 0 || (now - lastTime) > 1.0 {
+            lastTime = now
+            dispSourceW = targetSource
+            dispSysW = targetSys
+            dispChargeW = targetCharge
+            return (dispSourceW, dispSysW, dispChargeW)
+        }
+        let dt = min(0.1, max(0.001, now - lastTime))
+        lastTime = now
+        let f = 1.0 - exp(-dt * 12.0)
+        dispSourceW += (targetSource - dispSourceW) * f
+        dispSysW += (targetSys - dispSysW) * f
+        dispChargeW += (targetCharge - dispChargeW) * f
+        return (dispSourceW, dispSysW, dispChargeW)
+    }
+}
+
 struct PowerSankeyView: View {
     let adapterW: Double
     let batteryW: Double  // positive = charging, negative = discharging
@@ -2557,284 +3507,260 @@ struct PowerSankeyView: View {
     let charging: Bool
     let accent: Color
 
-    // Apple-grade palette colors
-    private static let blueStart   = Color(red: 0.12, green: 0.52, blue: 0.98) // Apple system blue
-    private static let blueEnd     = Color(red: 0.28, green: 0.68, blue: 1.00)
-    private static let greenStart  = Color(red: 0.16, green: 0.78, blue: 0.42) // Apple emerald
-    private static let greenEnd    = Color(red: 0.28, green: 0.92, blue: 0.56) // Bright electric emerald
-    private static let orangeStart = Color(red: 1.00, green: 0.56, blue: 0.00) // Apple orange
-    private static let orangeEnd   = Color(red: 1.00, green: 0.72, blue: 0.18)
+    // ponytail: D3 palettes → Sino roles (ac/batt/sys)
+    private static let ac   = Color(red: 0.22, green: 0.78, blue: 0.40)
+    private static let batt = Color(red: 1.00, green: 0.62, blue: 0.04)
+    private static let sys  = Color(red: 0.27, green: 0.61, blue: 0.96)
 
     var body: some View {
-        let (srcTitle, srcSymbol, srcWatts, sysWatts, chgWatts) = computeData()
-
-        HStack(spacing: 8) {
-            // Left column: Source (Adapter / Battery)
-            VStack(alignment: .trailing, spacing: 2) {
-                HStack(spacing: 3) {
-                    Text(srcTitle)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Image(systemName: srcSymbol)
-                        .font(.system(size: 8.5, weight: .semibold))
-                        .foregroundStyle(charging ? Self.greenStart : Self.orangeStart)
-                }
-                Text(srcWatts)
-                    .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.primary)
-            }
-            .frame(width: 58, height: 68, alignment: .trailing)
-
-            // Flow Ribbons with smooth curves & luminous animation
-            TimelineView(.animation(minimumInterval: 0.016, paused: !charging)) { tl in
-                let t = tl.date.timeIntervalSinceReferenceDate
-                ribbonsCanvas(time: t)
-            }
-
-            // Right column: Sinks (System, and optional Charging)
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 3) {
-                        Image(systemName: "cpu")
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundStyle(Self.blueStart)
-                        Text("System")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(sysWatts)
-                        .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(.primary)
-                }
-
-                if charging && batteryW > 0 {
-                    Spacer(minLength: 6)
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "bolt.fill")
-                                .font(.system(size: 8.5, weight: .semibold))
-                                .foregroundStyle(Self.greenStart)
-                            Text("Charging")
-                                .font(.system(size: 9, weight: .medium))
-                                .foregroundStyle(.secondary)
-                        }
-                        Text(chgWatts)
-                            .font(.system(size: 9.5, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(.primary)
-                    }
-                }
-            }
-            .frame(width: 62, height: 68, alignment: .leading)
-        }
-        .padding(.horizontal, 4)
-    }
-
-    private func computeData() -> (String, String, String, String, String) {
-        let srcW = charging ? (adapterW > 0 ? adapterW : systemW) : (systemW > 0 ? systemW : abs(batteryW))
-        let srcTitle = charging ? "Adapter" : "Battery"
-        let srcSymbol = charging ? "powerplug.fill" : "battery.100"
-        let chgW = (charging && batteryW > 0) ? batteryW : 0.0
-        return (srcTitle, srcSymbol, watts(srcW), watts(max(systemW, 0.5)), watts(chgW))
-    }
-
-    // ponytail: 2-sink partition (system + charging) with dual-phase additive shimmer & specular edge glint
-    private func ribbonsCanvas(time: Double) -> some View {
-        Canvas { ctx, size in
+        // ponytail: sine ping-pong of blend center, ends pinned → Metal if still mid
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { tl in
+            let t = tl.date.timeIntervalSinceReferenceDate
+            let e = CGFloat(0.50 + 0.22 * sin(t * Double.pi * 2.0 / 3.2))
+            Canvas { ctx, size in
             let W = size.width, H = size.height
-            let pillW: CGFloat = 4.5
-            let srcX: CGFloat = 2
-            let dstX: CGFloat = max(2, W - pillW - 2)
+            let padL: CGFloat = 54
+            let padR: CGFloat = 58
+            let nodeW: CGFloat = 8
+            let srcX = padL
+            let dstX = max(srcX + nodeW + 28, W - padR - nodeW)
 
-            let sourceW = charging ? (adapterW > 0 ? adapterW : systemW) : (systemW > 0 ? systemW : abs(batteryW))
-            let sysW = max(systemW, 0.5)
-            let chargeW = (charging && batteryW > 0) ? batteryW : 0.0
+            let targetSourceW = charging ? (adapterW > 0 ? adapterW : systemW) : (systemW > 0 ? systemW : abs(batteryW))
+            let targetSysW = max(systemW, 0.5)
+            let targetChargeW = (charging && batteryW > 0) ? batteryW : 0.0
+
+            let (sourceW, sysW, chargeW) = SankeyInterpolator.shared.update(
+                targetSource: targetSourceW,
+                targetSys: targetSysW,
+                targetCharge: targetChargeW
+            )
             let totalSink = sysW + chargeW
             let total = max(sourceW, totalSink, 0.5)
 
-            let maxRibbonH: CGFloat = min(H * 0.76, 56)
+            let maxH = H * 0.68
+            let srcH = max(8, CGFloat(sourceW / total) * maxH)
+            let sysH = max(7, CGFloat(sysW / total) * maxH)
+            let chgH: CGFloat = chargeW > 0 ? max(7, CGFloat(chargeW / total) * maxH) : 0
+            let gap: CGFloat = chgH > 0 ? 10 : 0
+            let rightH = sysH + chgH + gap
 
-            let srcH = max(6, CGFloat(sourceW / total) * maxRibbonH)
-            let sysH = max(5, CGFloat(sysW / total) * maxRibbonH)
-            let chgH = chargeW > 0 ? max(5, CGFloat(chargeW / total) * maxRibbonH) : 0
-
-            let srcMidY = H / 2
-            let srcTop  = srcMidY - srcH / 2
-            let srcBot  = srcMidY + srcH / 2
-
-            // Right side distribution with smooth gap
-            let gap: CGFloat = chgH > 0 ? 6.0 : 0
-            let totalRightH = sysH + chgH + gap
-            let rightTop = H / 2 - totalRightH / 2
-            let sysTop = rightTop
+            let srcTop = (H - srcH) / 2
+            let srcBot = srcTop + srcH
+            let sysTop = (H - rightH) / 2
             let sysBot = sysTop + sysH
-            let chgTop = chgH > 0 ? sysBot + gap : sysBot
+            let chgTop = sysBot + gap
             let chgBot = chgTop + chgH
 
-            // Source split: proportional to sinks to avoid overflow or gap
-            let sysRatio = totalSink > 0 ? CGFloat(sysW / totalSink) : 1.0
-            let sysSliceH = chgH > 0 ? min(srcH - 3, max(3, srcH * sysRatio)) : srcH
+            let sysRatio = totalSink > 0 ? CGFloat(sysW / totalSink) : 1
+            let sysSliceH = chgH > 0 ? max(4, srcH * sysRatio) : srcH
 
-            let x0 = srcX + pillW
-            let x1 = dstX
-            let midX = (x0 + x1) * 0.5
+            // tuck ribbons under node centers (d3-sankey overlap)
+            let x0 = srcX + nodeW * 0.5
+            let x1 = dstX + nodeW * 0.5
+            let dx = x1 - x0
+            let k: CGFloat = 0.5
 
-            // Helper for monotonic horizontal-tangent S-curve
-            func addSCurve(to path: inout Path, from p0: CGPoint, to p1: CGPoint) {
-                path.addCurve(to: p1,
-                              control1: CGPoint(x: midX, y: p0.y),
-                              control2: CGPoint(x: midX, y: p1.y))
-            }
-
-            // Smooth cubic ribbon generator
-            func makeRibbon(srcY0: CGFloat, srcY1: CGFloat, dstY0: CGFloat, dstY1: CGFloat) -> Path {
+            func ribbon(sy0: CGFloat, sy1: CGFloat, dy0: CGFloat, dy1: CGFloat) -> Path {
                 var p = Path()
-                p.move(to: CGPoint(x: x0, y: srcY0))
-                p.addCurve(to: CGPoint(x: x1, y: dstY0),
-                           control1: CGPoint(x: midX, y: srcY0),
-                           control2: CGPoint(x: midX, y: dstY0))
-                p.addLine(to: CGPoint(x: x1, y: dstY1))
-                p.addCurve(to: CGPoint(x: x0, y: srcY1),
-                           control1: CGPoint(x: midX, y: dstY1),
-                           control2: CGPoint(x: midX, y: srcY1))
+                p.move(to: CGPoint(x: x0, y: sy0))
+                p.addCurve(to: CGPoint(x: x1, y: dy0),
+                           control1: CGPoint(x: x0 + dx * k, y: sy0),
+                           control2: CGPoint(x: x1 - dx * k, y: dy0))
+                p.addLine(to: CGPoint(x: x1, y: dy1))
+                p.addCurve(to: CGPoint(x: x0, y: sy1),
+                           control1: CGPoint(x: x1 - dx * k, y: dy1),
+                           control2: CGPoint(x: x0 + dx * k, y: sy1))
                 p.closeSubpath()
                 return p
             }
 
-            // 1. System Ribbon
-            let sysPath = makeRibbon(srcY0: srcTop, srcY1: srcTop + sysSliceH, dstY0: sysTop, dstY1: sysBot)
-            let sysSourceCol = charging ? Self.greenStart : Self.orangeStart
-            let sysGrad = Gradient(colors: [
-                sysSourceCol.opacity(0.30),
-                Self.blueEnd.opacity(0.42)
-            ])
-            ctx.fill(sysPath, with: .linearGradient(sysGrad, startPoint: CGPoint(x: x0, y: srcMidY), endPoint: CGPoint(x: x1, y: (sysTop + sysBot)/2)))
-
-            // Top specular highlight on System ribbon
-            var sysTopLine = Path()
-            sysTopLine.move(to: CGPoint(x: x0, y: srcTop))
-            addSCurve(to: &sysTopLine, from: CGPoint(x: x0, y: srcTop), to: CGPoint(x: x1, y: sysTop))
-            let sysTopGrad = Gradient(colors: [sysSourceCol.opacity(0.60), Self.blueEnd.opacity(0.70)])
-            ctx.stroke(sysTopLine, with: .linearGradient(sysTopGrad, startPoint: CGPoint(x: x0, y: srcTop), endPoint: CGPoint(x: x1, y: sysTop)), style: StrokeStyle(lineWidth: 1.0))
-
-            // Bottom edge line on System ribbon
-            var sysBotLine = Path()
-            sysBotLine.move(to: CGPoint(x: x0, y: srcTop + sysSliceH))
-            addSCurve(to: &sysBotLine, from: CGPoint(x: x0, y: srcTop + sysSliceH), to: CGPoint(x: x1, y: sysBot))
-            ctx.stroke(sysBotLine, with: .color(Self.blueEnd.opacity(0.25)), style: StrokeStyle(lineWidth: 0.6))
-
-            // 2. Charging Ribbon & Luminous Shimmer
-            if chgH > 0 {
-                let chgPath = makeRibbon(srcY0: srcTop + sysSliceH, srcY1: srcBot, dstY0: chgTop, dstY1: chgBot)
-                let chgGrad = Gradient(colors: [
-                    Self.greenStart.opacity(0.36),
-                    Self.greenEnd.opacity(0.50)
-                ])
-                ctx.fill(chgPath, with: .linearGradient(chgGrad, startPoint: CGPoint(x: x0, y: srcMidY), endPoint: CGPoint(x: x1, y: (chgTop + chgBot)/2)))
-
-                // Top specular highlight on Charging ribbon
-                var chgTopLine = Path()
-                chgTopLine.move(to: CGPoint(x: x0, y: srcTop + sysSliceH))
-                addSCurve(to: &chgTopLine, from: CGPoint(x: x0, y: srcTop + sysSliceH), to: CGPoint(x: x1, y: chgTop))
-                let chgTopGrad = Gradient(colors: [Self.greenStart.opacity(0.65), Self.greenEnd.opacity(0.80)])
-                ctx.stroke(chgTopLine, with: .linearGradient(chgTopGrad, startPoint: CGPoint(x: x0, y: srcTop + sysSliceH), endPoint: CGPoint(x: x1, y: chgTop)), style: StrokeStyle(lineWidth: 1.0))
-
-                // Bottom highlight sheen on Charging ribbon
-                var chgBotLine = Path()
-                chgBotLine.move(to: CGPoint(x: x0, y: srcBot))
-                addSCurve(to: &chgBotLine, from: CGPoint(x: x0, y: srcBot), to: CGPoint(x: x1, y: chgBot))
-                ctx.stroke(chgBotLine, with: .color(Self.greenEnd.opacity(0.35)), style: StrokeStyle(lineWidth: 0.7))
-
-                // Luminous shimmering pulse wave sweeping along charging ribbon
-                if charging {
-                    let cycle = 2.4
-                    let p1 = CGFloat(time.truncatingRemainder(dividingBy: cycle) / cycle)
-                    let p2 = CGFloat((time + cycle * 0.5).truncatingRemainder(dividingBy: cycle) / cycle)
-                    let flowStart = CGPoint(x: x0, y: (srcTop + sysSliceH + srcBot) * 0.5)
-                    let flowEnd   = CGPoint(x: x1, y: (chgTop + chgBot) * 0.5)
-
-                    // Primary luminous wave
-                    let c1 = -0.30 + p1 * 1.60
-                    let hw1: CGFloat = 0.22
-                    let waveGrad1 = Gradient(stops: [
-                        .init(color: .clear, location: c1 - hw1),
-                        .init(color: Color(red: 0.40, green: 1.0, blue: 0.65).opacity(0.35), location: c1 - hw1 * 0.5),
-                        .init(color: Color.white.opacity(0.85), location: c1),
-                        .init(color: Color(red: 0.40, green: 1.0, blue: 0.65).opacity(0.35), location: c1 + hw1 * 0.5),
-                        .init(color: .clear, location: c1 + hw1)
-                    ])
-
-                    // Secondary trailing softer wave
-                    let c2 = -0.30 + p2 * 1.60
-                    let hw2: CGFloat = 0.30
-                    let waveGrad2 = Gradient(stops: [
-                        .init(color: .clear, location: c2 - hw2),
-                        .init(color: Self.greenEnd.opacity(0.30), location: c2 - hw2 * 0.5),
-                        .init(color: Color.white.opacity(0.40), location: c2),
-                        .init(color: Self.greenEnd.opacity(0.30), location: c2 + hw2 * 0.5),
-                        .init(color: .clear, location: c2 + hw2)
-                    ])
-
-                    // Specular highlight glint along the top curve
-                    let glintGrad = Gradient(stops: [
-                        .init(color: .clear, location: c1 - hw1 * 0.7),
-                        .init(color: Color.white.opacity(0.95), location: c1),
-                        .init(color: .clear, location: c1 + hw1 * 0.7)
-                    ])
-
-                    ctx.drawLayer { shimmer in
-                        shimmer.blendMode = .plusLighter
-                        shimmer.fill(chgPath, with: .linearGradient(waveGrad1, startPoint: flowStart, endPoint: flowEnd))
-                        shimmer.fill(chgPath, with: .linearGradient(waveGrad2, startPoint: flowStart, endPoint: flowEnd))
-                        shimmer.stroke(chgTopLine, with: .linearGradient(glintGrad, startPoint: CGPoint(x: x0, y: srcTop + sysSliceH), endPoint: CGPoint(x: x1, y: chgTop)), style: StrokeStyle(lineWidth: 1.4))
-                    }
-                }
+            func edge(sy: CGFloat, dy: CGFloat) -> Path {
+                var p = Path()
+                p.move(to: CGPoint(x: x0, y: sy))
+                p.addCurve(to: CGPoint(x: x1, y: dy),
+                           control1: CGPoint(x: x0 + dx * k, y: sy),
+                           control2: CGPoint(x: x1 - dx * k, y: dy))
+                return p
             }
 
-            // 3. Apple-style rounded pill nodes with specular sheen & ambient glow
-            let srcPill = CGRect(x: srcX, y: srcTop, width: pillW, height: srcH)
-            let sysPill = CGRect(x: dstX, y: sysTop, width: pillW, height: sysH)
-            let srcCol = charging ? Self.greenStart : Self.orangeStart
-
-            // Ambient glow behind active nodes
-            if charging {
-                ctx.drawLayer { g in
-                    g.blendMode = .plusLighter
-                    g.addFilter(.blur(radius: 3.0))
-                    g.fill(Path(roundedRect: srcPill, cornerRadius: pillW / 2), with: .color(srcCol.opacity(0.40)))
-                    if chgH > 0 {
-                        let chgPill = CGRect(x: dstX, y: chgTop, width: pillW, height: chgH)
-                        let breathe = CGFloat(0.35 + 0.15 * sin(time * .pi * 2.0 / 1.8))
-                        g.fill(Path(roundedRect: chgPill, cornerRadius: pillW / 2), with: .color(Self.greenEnd.opacity(breathe)))
-                    }
-                }
+            func fillRibbon(_ path: Path, from a: Color, to b: Color) {
+                let op: CGFloat = 0.42
+                let band: CGFloat = 0.22
+                ctx.fill(path, with: .linearGradient(
+                    Gradient(stops: [
+                        .init(color: a.opacity(op), location: 0),
+                        .init(color: a.opacity(op), location: e - band),
+                        .init(color: b.opacity(op), location: e + band),
+                        .init(color: b.opacity(op), location: 1),
+                    ]),
+                    startPoint: CGPoint(x: x0, y: 0),
+                    endPoint: CGPoint(x: x1, y: 0)
+                ))
             }
 
-            // Node fills: vertical linear gradients
-            ctx.fill(
-                Path(roundedRect: srcPill, cornerRadius: pillW / 2),
-                with: .linearGradient(Gradient(colors: [srcCol, srcCol.opacity(0.80)]), startPoint: CGPoint(x: 0, y: srcTop), endPoint: CGPoint(x: 0, y: srcBot))
-            )
-            ctx.stroke(Path(roundedRect: srcPill, cornerRadius: pillW / 2), with: .color(Color.white.opacity(0.30)), style: StrokeStyle(lineWidth: 0.5))
+            func quietEdge(_ p: Path, from a: Color, to b: Color) {
+                let grad = Gradient(colors: [a.opacity(0.18), b.opacity(0.18)])
+                ctx.stroke(p, with: .linearGradient(grad, startPoint: CGPoint(x: x0, y: 0), endPoint: CGPoint(x: x1, y: 0)), lineWidth: 0.5)
+            }
 
-            ctx.fill(
-                Path(roundedRect: sysPill, cornerRadius: pillW / 2),
-                with: .linearGradient(Gradient(colors: [Self.blueEnd, Self.blueStart]), startPoint: CGPoint(x: 0, y: sysTop), endPoint: CGPoint(x: 0, y: sysBot))
-            )
-            ctx.stroke(Path(roundedRect: sysPill, cornerRadius: pillW / 2), with: .color(Color.white.opacity(0.30)), style: StrokeStyle(lineWidth: 0.5))
+            let srcCol = Self.batt
+            let sysPath = ribbon(sy0: srcTop, sy1: srcTop + sysSliceH, dy0: sysTop, dy1: sysBot)
+            fillRibbon(sysPath, from: srcCol, to: Self.sys)
+            quietEdge(edge(sy: srcTop, dy: sysTop), from: srcCol, to: Self.sys)
+            quietEdge(edge(sy: srcTop + sysSliceH, dy: sysBot), from: srcCol, to: Self.sys)
 
             if chgH > 0 {
-                let chgPill = CGRect(x: dstX, y: chgTop, width: pillW, height: chgH)
-                ctx.fill(
-                    Path(roundedRect: chgPill, cornerRadius: pillW / 2),
-                    with: .linearGradient(Gradient(colors: [Self.greenEnd, Self.greenStart]), startPoint: CGPoint(x: 0, y: chgTop), endPoint: CGPoint(x: 0, y: chgBot))
-                )
-                ctx.stroke(Path(roundedRect: chgPill, cornerRadius: pillW / 2), with: .color(Color.white.opacity(0.35)), style: StrokeStyle(lineWidth: 0.5))
+                let chgPath = ribbon(sy0: srcTop + sysSliceH, sy1: srcBot, dy0: chgTop, dy1: chgBot)
+                fillRibbon(chgPath, from: srcCol, to: Self.ac)
+                quietEdge(edge(sy: srcTop + sysSliceH, dy: chgTop), from: srcCol, to: Self.ac)
+                quietEdge(edge(sy: srcBot, dy: chgBot), from: srcCol, to: Self.ac)
+            }
+
+            func bar(_ r: CGRect, _ c: Color) {
+                ctx.fill(Path(roundedRect: r, cornerRadius: 1.5), with: .color(c))
+            }
+            bar(CGRect(x: srcX, y: srcTop, width: nodeW, height: srcH), srcCol)
+            bar(CGRect(x: dstX, y: sysTop, width: nodeW, height: sysH), Self.sys)
+            if chgH > 0 {
+                bar(CGRect(x: dstX, y: chgTop, width: nodeW, height: chgH), Self.ac)
+            }
+
+            let titleF = Font.system(size: 9, weight: .medium)
+            let valF = Font.system(size: 9.5, weight: .semibold).monospacedDigit()
+            let srcTitle = charging ? "Adapter" : "Battery"
+            let srcMid = srcTop + srcH / 2
+            ctx.draw(Text(srcTitle).font(titleF).foregroundColor(.secondary),
+                     at: CGPoint(x: srcX - 6, y: srcMid - 7), anchor: .trailing)
+            ctx.draw(Text(watts(sourceW)).font(valF).foregroundColor(.primary),
+                     at: CGPoint(x: srcX - 6, y: srcMid + 6), anchor: .trailing)
+
+            let sysMid = sysTop + sysH / 2
+            ctx.draw(Text("System").font(titleF).foregroundColor(.secondary),
+                     at: CGPoint(x: dstX + nodeW + 6, y: sysMid - 7), anchor: .leading)
+            ctx.draw(Text(watts(sysW)).font(valF).foregroundColor(.primary),
+                     at: CGPoint(x: dstX + nodeW + 6, y: sysMid + 6), anchor: .leading)
+
+            if chgH > 0 {
+                let chgMid = chgTop + chgH / 2
+                ctx.draw(Text("Charging").font(titleF).foregroundColor(.secondary),
+                         at: CGPoint(x: dstX + nodeW + 6, y: chgMid - 7), anchor: .leading)
+                ctx.draw(Text(watts(chargeW)).font(valF).foregroundColor(.primary),
+                         at: CGPoint(x: dstX + nodeW + 6, y: chgMid + 6), anchor: .leading)
             }
         }
     }
+}
 }
 
 private func watts(_ w: Double) -> String {
     if w < 1 { return String(format: "%.0f mW", w * 1000) }
     return String(format: "%.2f W", w)
+}
+
+// MARK: - Clamshell / pmset sleep helper
+enum FanCtl {
+    static var ready: Bool {
+        FileManager.default.fileExists(atPath: "/var/run/com.lov3u.sino.smcwrite.sock")
+    }
+
+    static func install() -> Bool {
+        let src = Bundle.main.path(forResource: "sino-smcwrite", ofType: nil)
+            ?? Bundle.main.bundlePath + "/Contents/Resources/sino-smcwrite"
+        guard FileManager.default.isExecutableFile(atPath: src) || FileManager.default.fileExists(atPath: src) else {
+            return false
+        }
+        let escaped = src.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "do shell script \"\\\"\(escaped)\\\" --install\" with administrator privileges"
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+}
+
+enum PMSetHelper {
+    static let sudoersFile = "/private/etc/sudoers.d/sino_awake"
+
+    static var isSudoersInstalled: Bool {
+        FileManager.default.fileExists(atPath: sudoersFile)
+    }
+
+    @discardableResult
+    static func installSudoers() -> Bool {
+        if isSudoersInstalled { return true }
+        let cmd = "printf '%s\\n%s\\n' 'Cmnd_Alias SINO_PMSET = /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0' '%admin ALL=(ALL) NOPASSWD: SINO_PMSET' > \(sudoersFile) && chmod 0440 \(sudoersFile)"
+        return runPrivileged(cmd)
+    }
+
+    static var isSleepDisabled: Bool {
+        let pipe = Pipe()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        proc.arguments = ["-g"]
+        proc.standardOutput = pipe
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let str = String(data: data, encoding: .utf8) else { return false }
+            for line in str.components(separatedBy: .newlines) {
+                if line.contains("SleepDisabled") {
+                    let parts = line.split(whereSeparator: { $0.isWhitespace })
+                    if parts.count >= 2, parts[1] == "1" {
+                        return true
+                    }
+                }
+            }
+        } catch {}
+        return false
+    }
+
+    @discardableResult
+    static func setSleepDisabled(_ disable: Bool) -> Bool {
+        let current = isSleepDisabled
+        if disable == current { return true }
+
+        let val = disable ? "1" : "0"
+
+        // 1. Try passwordless sudo first
+        let sudoProc = Process()
+        sudoProc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        sudoProc.arguments = ["-n", "/usr/bin/pmset", "-a", "disablesleep", val]
+        do {
+            try sudoProc.run()
+            sudoProc.waitUntilExit()
+            if sudoProc.terminationStatus == 0 {
+                return true
+            }
+        } catch {}
+
+        // 2. If passwordless sudo failed, run with admin privileges
+        if disable {
+            let cmd = "printf '%s\\n%s\\n' 'Cmnd_Alias SINO_PMSET = /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0' '%admin ALL=(ALL) NOPASSWD: SINO_PMSET' > \(sudoersFile) && chmod 0440 \(sudoersFile) && /usr/bin/pmset -a disablesleep 1"
+            return runPrivileged(cmd)
+        } else {
+            return runPrivileged("/usr/bin/pmset -a disablesleep 0")
+        }
+    }
+
+    private static func runPrivileged(_ command: String) -> Bool {
+        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "do shell script \"\(escaped)\" with administrator privileges"
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
 }

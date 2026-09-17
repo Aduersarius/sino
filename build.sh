@@ -6,6 +6,10 @@ APP="$ROOT/dist/Sino.app"
 BIN="$APP/Contents/MacOS/Sino"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cc -O2 -o /tmp/sino-smcwrite "$ROOT/Sources/smcwrite.c" \
+  -isysroot "$SDK" -target arm64-apple-macos14.0 \
+  -framework IOKit -framework CoreFoundation
+cp /tmp/sino-smcwrite "$APP/Contents/Resources/sino-smcwrite"
 swiftc -parse-as-library -O -module-name Sino \
   -target arm64-apple-macos14.0 \
   -sdk "$SDK" \
@@ -22,6 +26,7 @@ ROOTAPP="/Applications/Sino.app"
 rm -rf "$ROOT/Pulse.app" "$ROOT/dist/Pulse.app" "$ROOT/Sino.app"
 mkdir -p "$ROOTAPP/Contents/MacOS" "$ROOTAPP/Contents/Resources"
 cp "$BIN" "$ROOTAPP/Contents/MacOS/Sino"
+cp /tmp/sino-smcwrite "$ROOTAPP/Contents/Resources/sino-smcwrite"
 cp "$ROOT/Info.plist" "$ROOTAPP/Contents/Info.plist"
 cp "$ROOT/Assets/AppIcon.icns" "$ROOTAPP/Contents/Resources/AppIcon.icns"
 echo -n 'APPL????' > "$ROOTAPP/Contents/PkgInfo"

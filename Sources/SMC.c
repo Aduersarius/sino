@@ -70,7 +70,7 @@ void sino_smc_shutdown(void) {
     }
 }
 
-int sino_smc_fans(float *rpm, float *maxrpm, int cap) {
+int sino_smc_fans(float *rpm, float *minrpm, float *maxrpm, int cap) {
     if (!g_conn || cap <= 0) return 0;
     unsigned char nbuf = 0;
     if (smc_read("FNum", &nbuf, 1, NULL, NULL) < 0) return 0;
@@ -81,6 +81,10 @@ int sino_smc_fans(float *rpm, float *maxrpm, int cap) {
         float v = 0;
         smc_read(k, &v, 4, NULL, NULL);
         rpm[i] = v;
+        k[2] = 'M'; k[3] = 'n';
+        v = 0;
+        smc_read(k, &v, 4, NULL, NULL);
+        if (minrpm) minrpm[i] = v > 500 ? v : 2000;
         k[2] = 'M'; k[3] = 'x';
         v = 0;
         smc_read(k, &v, 4, NULL, NULL);
@@ -143,4 +147,75 @@ int sino_pid_footprint(int pid, uint64_t *bytes) {
     if (proc_pid_rusage(pid, RUSAGE_INFO_V6, (rusage_info_t *)&ru) != 0) return -1;
     *bytes = ru.ri_phys_footprint ? ru.ri_phys_footprint : ru.ri_resident_size;
     return 0;
+}
+
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#define SINO_FAN_SOCK "/var/run/com.lov3u.sino.smcwrite.sock"
+static int g_fan_fd = -1;
+
+static int fan_xfer(const char *cmd) {
+    if (g_fan_fd < 0) return -1;
+    size_t n = strlen(cmd);
+    if (write(g_fan_fd, cmd, n) != (ssize_t)n) return -1;
+    char r[8] = {0};
+    ssize_t got = read(g_fan_fd, r, 7);
+    return (got >= 3 && r[0] == 'O' && r[1] == 'K') ? 0 : -1;
+}
+
+int sino_fan_ctl_open(void) {
+    if (g_fan_fd >= 0) {
+        if (fan_xfer("PING\n") == 0) return 0;
+        close(g_fan_fd);
+        g_fan_fd = -1;
+    }
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int nosig = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig));
+    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof(a));
+    a.sun_family = AF_UNIX;
+    strncpy(a.sun_path, SINO_FAN_SOCK, sizeof(a.sun_path) - 1);
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+        close(fd);
+        return -1;
+    }
+    g_fan_fd = fd;
+    if (fan_xfer("PING\n") != 0) {
+        close(g_fan_fd);
+        g_fan_fd = -1;
+        return -1;
+    }
+    return 0;
+}
+
+void sino_fan_ctl_close(void) {
+    if (g_fan_fd >= 0) {
+        close(g_fan_fd);
+        g_fan_fd = -1;
+    }
+}
+
+int sino_fan_ctl_auto(void) {
+    if (g_fan_fd < 0 && sino_fan_ctl_open() != 0) return -1;
+    int rc = fan_xfer("AUTO\n");
+    return rc;
+}
+
+int sino_fan_ctl_set(int fan, float rpm) {
+    if (g_fan_fd < 0 && sino_fan_ctl_open() != 0) return -1;
+    char line[64];
+    snprintf(line, sizeof(line), "SET %d %.0f\n", fan, rpm);
+    if (fan_xfer(line) == 0) return 0;
+    close(g_fan_fd);
+    g_fan_fd = -1;
+    if (sino_fan_ctl_open() != 0) return -1;
+    return fan_xfer(line);
 }

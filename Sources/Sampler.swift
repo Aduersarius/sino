@@ -30,10 +30,11 @@ struct FanSample: Identifiable {
     let id: Int
     let name: String
     var rpm: Double
+    var minRPM: Double
     var maxRPM: Double
 }
 
-struct ProcSample: Identifiable {
+struct ProcSample: Identifiable, Equatable {
     let id: pid_t
     let name: String
     let icon: NSImage?
@@ -42,6 +43,10 @@ struct ProcSample: Identifiable {
     var energyW: Double = 0
     var count: Int = 1
     var pids: [pid_t] = []
+
+    static func == (lhs: ProcSample, rhs: ProcSample) -> Bool {
+        lhs.id == rhs.id && lhs.name == rhs.name && lhs.cpu == rhs.cpu && lhs.mem == rhs.mem && lhs.count == rhs.count
+    }
 }
 
 struct NetworkGeo: Equatable {
@@ -58,6 +63,9 @@ struct Snapshot {
     var cpuUser = 0.0
     var cpuSystem = 0.0
     var cpuHistory: [Double] = []
+    var cpuMin = 0.0
+    var cpuMax = 0.0
+    var cpuAvg = 0.0
     var cores: [CoreSample] = []
     var ramPressure = 0.0
     var ramHistory: [Double] = []
@@ -136,8 +144,12 @@ final class Sampler: ObservableObject {
     private var prevProc: [pid_t: UInt64] = [:]
     private var prevProcAt = Date()
     private var history: [Double] = Array(repeating: 0, count: 48)
+    private var cpuSamples = 0
     private let eCores: Int
     private let pCores: Int
+    let totalCores: Int
+    private let timebaseNumer: UInt64
+    private let timebaseDenom: UInt64
     private let pageSize: UInt64
     private let memSize: UInt64
     private var diskNameCached: String?
@@ -183,6 +195,12 @@ final class Sampler: ObservableObject {
     init() {
         eCores = sysctlInt("hw.perflevel1.logicalcpu") ?? 0
         pCores = sysctlInt("hw.perflevel0.logicalcpu") ?? 0
+        let ncpu = sysctlInt("hw.ncpu") ?? (pCores + eCores)
+        totalCores = max(1, ncpu)
+        var tb = mach_timebase_info()
+        mach_timebase_info(&tb)
+        timebaseNumer = UInt64(max(1, tb.numer))
+        timebaseDenom = UInt64(max(1, tb.denom))
         var ps: vm_size_t = 0
         host_page_size(mach_host_self(), &ps)
         pageSize = UInt64(ps)
@@ -286,10 +304,10 @@ final class Sampler: ObservableObject {
             var userSum = 0.0, sysSum = 0.0, totSum = 0.0
             var coreUsage: [Double] = []
             for i in 0..<cores {
-                let du = Double(load[i][0] &- prevTicks[i][0])
-                let ds = Double(load[i][1] &- prevTicks[i][1])
-                let di = Double(load[i][2] &- prevTicks[i][2])
-                let dn = Double(load[i][3] &- prevTicks[i][3])
+                let du = load[i][0] >= prevTicks[i][0] ? Double(load[i][0] - prevTicks[i][0]) : 0
+                let ds = load[i][1] >= prevTicks[i][1] ? Double(load[i][1] - prevTicks[i][1]) : 0
+                let di = load[i][2] >= prevTicks[i][2] ? Double(load[i][2] - prevTicks[i][2]) : 0
+                let dn = load[i][3] >= prevTicks[i][3] ? Double(load[i][3] - prevTicks[i][3]) : 0
                 let tot = du + ds + di + dn
                 let u = tot > 0 ? (du + dn) / tot : 0
                 let sy = tot > 0 ? ds / tot : 0
@@ -299,8 +317,14 @@ final class Sampler: ObservableObject {
             s.cpuUser = userSum / totSum
             s.cpuSystem = sysSum / totSum
             history.removeFirst()
-            history.append(s.cpuUser + s.cpuSystem)
+            let total = max(0, min(1, s.cpuUser + s.cpuSystem))
+            history.append(total)
             s.cpuHistory = history
+            cpuSamples += 1
+            let valid = history.suffix(min(cpuSamples, history.count))
+            s.cpuMin = valid.min() ?? total
+            s.cpuMax = valid.max() ?? total
+            s.cpuAvg = valid.reduce(0, +) / Double(max(valid.count, 1))
             // host_processor_info lists P-cores first on Apple Silicon
             let p = (pCores > 0 && eCores + pCores == cores) ? pCores : 0
             s.cores = coreUsage.enumerated().map { i, v in
@@ -509,6 +533,33 @@ final class Sampler: ObservableObject {
         }
     }
 
+    // ponytail: [NET_RT_IFLIST2] -> native 64-bit byte counters to prevent 32-bit (4GB) rollover
+    private func iface64Bytes(name: String) -> (inn: UInt64, out: UInt64)? {
+        let idx = if_nametoindex(name)
+        guard idx != 0 else { return nil }
+        var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, Int32(idx)]
+        var size: size_t = 0
+        guard sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, u_int(mib.count), &buf, &size, nil, 0) == 0 else { return nil }
+
+        var offset = 0
+        while offset + MemoryLayout<if_msghdr>.size <= size {
+            var hdr = if_msghdr()
+            buf.withUnsafeBytes { _ = memcpy(&hdr, $0.baseAddress?.advanced(by: offset), MemoryLayout<if_msghdr>.size) }
+            guard hdr.ifm_msglen > 0 else { break }
+            if Int32(hdr.ifm_type) == RTM_IFINFO2, offset + MemoryLayout<if_msghdr2>.size <= size {
+                var hdr2 = if_msghdr2()
+                buf.withUnsafeBytes { _ = memcpy(&hdr2, $0.baseAddress?.advanced(by: offset), MemoryLayout<if_msghdr2>.size) }
+                if UInt32(hdr2.ifm_index) == idx {
+                    return (hdr2.ifm_data.ifi_ibytes, hdr2.ifm_data.ifi_obytes)
+                }
+            }
+            offset += Int(hdr.ifm_msglen)
+        }
+        return nil
+    }
+
     private func sampleNet(_ s: inout Snapshot) {
         var addrs: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&addrs) == 0, let first = addrs else { return }
@@ -581,7 +632,11 @@ final class Sampler: ObservableObject {
             if sa != sb { return sa < sb }
             return a.inn &+ a.out < b.inn &+ b.out
         }
-        guard let iface = pick else { return }
+        guard var iface = pick else { return }
+        if let b64 = iface64Bytes(name: iface.name) {
+            iface.inn = b64.inn
+            iface.out = b64.out
+        }
         if let cached = macCache[iface.name] {
             s.mac = cached
         } else if let mac = ioMAC(for: iface.name), !placeholder(mac) {
@@ -657,9 +712,12 @@ final class Sampler: ObservableObject {
             s.netBSSID = "—"
         }
         let dt = Date().timeIntervalSince(prevNetAt)
-        if prevNetName == iface.name, prevNetIn > 0, dt > 0.2 {
-            s.netIn = Double(iface.inn &- prevNetIn) / dt
-            s.netOut = Double(iface.out &- prevNetOut) / dt
+        if prevNetName == iface.name, prevNetIn > 0, dt > 0.2, dt < 10.0 {
+            // ponytail: safe delta (no &- wrapping underflow) + 25 GB/s sanity ceiling
+            let dIn = iface.inn >= prevNetIn ? Double(iface.inn - prevNetIn) / dt : 0
+            let dOut = iface.out >= prevNetOut ? Double(iface.out - prevNetOut) / dt : 0
+            s.netIn = dIn < 25_000_000_000 ? dIn : 0
+            s.netOut = dOut < 25_000_000_000 ? dOut : 0
         } else {
             s.netIn = 0
             s.netOut = 0
@@ -731,6 +789,8 @@ final class Sampler: ObservableObject {
         netTopName = "—"
         netTopIcon = nil
         netTopBps = 0
+        prevProc = [:]
+        prevEnergy = [:]
         var s = snap
         s.processes = []
         s.memProcesses = []
@@ -871,12 +931,12 @@ final class Sampler: ObservableObject {
 
     private func sampleFans(_ s: inout Snapshot) {
         var rpm = [Float](repeating: 0, count: 8)
+        var mn = [Float](repeating: 0, count: 8)
         var mx = [Float](repeating: 0, count: 8)
-        let n = Int(sino_smc_fans(&rpm, &mx, 8))
-        var fans: [FanSample] = (0..<n).map { i in
-            FanSample(id: i, name: "Fan #\(i + 1)", rpm: Double(rpm[i]), maxRPM: Double(mx[i]))
+        let n = Int(sino_smc_fans(&rpm, &mn, &mx, 8))
+        let fans: [FanSample] = (0..<n).map { i in
+            FanSample(id: i, name: "Fan #\(i + 1)", rpm: Double(rpm[i]), minRPM: Double(mn[i]), maxRPM: Double(mx[i]))
         }
-        fans.sort { $0.rpm > $1.rpm }
         s.fans = fans
         let maxFrac = fans.compactMap { $0.maxRPM > 0 ? min(1.0, max(0.0, $0.rpm / $0.maxRPM)) : 0.0 }.max() ?? 0.0
         fanHistory.removeFirst()
@@ -997,9 +1057,9 @@ final class Sampler: ObservableObject {
             var nj: UInt64 = 0
             let hasE = sino_pid_energy_nj(Int32(pid), &nj) == 0
             if hasE { nextEnergy[pid] = nj }
-            let wantCPU = dt > 0.2 && prevProc[pid] != nil
+            let wantCPU = dt > 0.2 && dt < 10.0 && prevProc[pid] != nil
             let wantMem = foot > 16 * 1024 * 1024
-            let wantE = hasE && dt > 0.2 && prevEnergy[pid] != nil
+            let wantE = hasE && dt > 0.2 && dt < 10.0 && prevEnergy[pid] != nil
             if !wantCPU && !wantMem && !wantE { continue }
             let (name, icon) = procIdentity(pid)
             if name == "kernel_task" || name == "Sino" { continue }
@@ -1008,9 +1068,10 @@ final class Sampler: ObservableObject {
             }
             if wantCPU, let prev = prevProc[pid] {
                 let d = total >= prev ? total - prev : 0
-                let pct = (Double(d) / 1_000_000_000) / dt
-                if pct >= 0.005 {
-                    ranked.append((pid, name, icon, min(1, pct)))
+                let nanos = (Double(d) * Double(timebaseNumer)) / Double(timebaseDenom)
+                let pct = (nanos / 1_000_000_000.0) / max(dt, 0.001)
+                if pct >= 0.001 {
+                    ranked.append((pid, name, icon, min(Double(totalCores), pct)))
                 }
             }
             if wantE, let prev = prevEnergy[pid], nj >= prev {
@@ -1024,7 +1085,7 @@ final class Sampler: ObservableObject {
         s.processes = aggregateProcs(
             ranked.map { ProcSample(id: $0.0, name: $0.1, icon: $0.2, cpu: $0.3, count: 1, pids: [$0.0]) },
             by: \.cpu
-        ).prefix(10).map { $0 }
+        ).prefix(30).map { $0 }
 
         byMem.sort { $0.3 > $1.3 }
         s.memProcesses = aggregateProcs(
