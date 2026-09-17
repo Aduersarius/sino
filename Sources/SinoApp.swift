@@ -800,9 +800,6 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         clickMon = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
             self?.closeIfOutside()
         }
-        let settingsUp = settingsWC?.window?.isVisible == true
-        if !settingsUp {
-        // ponytail: span catcher across all screens so multi-monitor clicks dismiss reliably even with separate spaces
         let screens = NSScreen.screens.isEmpty ? [(item.button?.window?.screen ?? NSScreen.main)].compactMap { $0 } : NSScreen.screens
         catchers = screens.map { s in
             let p = NSPanel(contentRect: s.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -819,9 +816,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             v.onDown = { [weak self] in self?.closeIfOutside() }
             v.shouldPassThrough = { [weak self] pt in
                 guard let self else { return false }
-                if let sw = self.settingsWC?.window, sw.isVisible, sw.frame.contains(pt) {
-                    return true
-                }
+                if let sw = self.settingsWC?.window, sw.isVisible, sw.frame.contains(pt) { return true }
+                if let ow = self.onboardingWC?.window, ow.isVisible, ow.frame.contains(pt) { return true }
                 return false
             }
             p.contentView = v
@@ -829,11 +825,9 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             p.orderFrontRegardless()
             return p
         }
-        // ponytail: catchers stay one level below; re-front drop so hover hits cards
         for c in catchers {
             drop.order(.above, relativeTo: c.windowNumber)
             if detail.isVisible { detail.order(.above, relativeTo: c.windowNumber) }
-        }
         }
         startHoverMon()
         dropClickMon = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] e in
@@ -854,6 +848,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
                     }
                 }
             }
+            self.closeIfOutside()
             return e
         }
     }
@@ -896,7 +891,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func pickHover() {
         guard dropOpen else { return }
         let loc = NSEvent.mouseLocation
-        if detail.isVisible, detail.frame.insetBy(dx: -8, dy: -4).contains(loc) {
+        if detail.isVisible, detail.frame.contains(loc) {
             if let panel { setPanel(panel) }
             return
         }
@@ -904,7 +899,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             setPanel(id)
             return
         }
-        if drop.frame.contains(loc) { setPanel(nil) }
+        setPanel(nil)
     }
 
     func stopClickMon() {
