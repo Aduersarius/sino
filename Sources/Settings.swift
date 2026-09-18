@@ -67,6 +67,7 @@ enum FanCurves {
 final class Prefs: ObservableObject {
     static let shared = Prefs()
     static let modules: [(id: String, title: String, icon: String)] = [
+        ("cat", "Cat", "cat"),
         ("cpu", "CPU", "cpu"),
         ("ram", "RAM", "memorychip"),
         ("gpu", "GPU", "display"),
@@ -185,11 +186,21 @@ final class Prefs: ObservableObject {
         ramProcCount = (d.object(forKey: "sino.ramProcCount") ?? d.object(forKey: "pulse.ramProcCount")) as? Int ?? 10
         awakeShortcutKeyCode = (d.object(forKey: "sino.awakeShortcutKeyCode") ?? d.object(forKey: "pulse.awakeShortcutKeyCode")) as? Int ?? kVK_ANSI_A
         awakeShortcutModifiers = (d.object(forKey: "sino.awakeShortcutModifiers") ?? d.object(forKey: "pulse.awakeShortcutModifiers")) as? UInt ?? UInt(controlKey | optionKey)
-        bar = Set(d.stringArray(forKey: "sino.bar") ?? d.stringArray(forKey: "pulse.bar") ?? ["ram", "cpu"])
+        var barSet = Set(d.stringArray(forKey: "sino.bar") ?? d.stringArray(forKey: "pulse.bar") ?? ["cat", "ram", "cpu"])
         let ids = Prefs.modules.map(\.id)
         var order = d.stringArray(forKey: "sino.barOrder") ?? d.stringArray(forKey: "pulse.barOrder") ?? []
         order = order.filter { ids.contains($0) }
         for id in ids where !order.contains(id) { order.append(id) }
+        // ponytail: one-shot — sit the cat on the left; toggle stays in Menu Bar
+        if d.object(forKey: "sino.catChip") == nil {
+            barSet.insert("cat")
+            if let i = order.firstIndex(of: "cat") { order.remove(at: i) }
+            order.insert("cat", at: 0)
+            d.set(true, forKey: "sino.catChip")
+            d.set(Array(barSet), forKey: "sino.bar")
+            d.set(order, forKey: "sino.barOrder")
+        }
+        bar = barSet
         barOrder = order
         let dropIds = Prefs.dropElements.map(\.id)
         var dOrder = d.stringArray(forKey: "sino.dropOrder") ?? []

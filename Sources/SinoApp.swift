@@ -76,6 +76,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     private var lastDark = false
     private var appearObs: NSKeyValueObservation?
     private var lastChips: [MenuChip] = []
+    private var catTimer: Timer?
+    private var lastCatFrame = -1
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyTheme()
@@ -243,6 +245,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         guard extra != nil, let button = item?.button else { return }
         let chips = menuChips()
         extra.chips = chips
+        extra.catAnimated = true
+        armCatAnim()
         let h = max(button.bounds.height, 22)
         let w = extra.fittingWidth
         if abs(extra.frame.width - w) > 0.5 || abs(extra.frame.height - h) > 0.5 {
@@ -252,8 +256,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         if abs(item.length - len) > 0.5 {
             item.length = len
         }
-        if chips != lastChips || button.image == nil || extra.flashAlpha > 0 {
+        let catF = extra.catFrame
+        if chips != lastChips || (prefs.bar.contains("cat") && catF != lastCatFrame) || button.image == nil || extra.flashAlpha > 0 {
             lastChips = chips
+            lastCatFrame = catF
             button.effectiveAppearance.performAsCurrentDrawingAppearance {
                 button.image = extra.makeImage()
             }
@@ -263,6 +269,31 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             button.highlight(false)
         }
         if dropOpen { sizePopover() }
+    }
+
+    func armCatAnim() {
+        let on = prefs.bar.contains("cat")
+        if on {
+            guard catTimer == nil else { return }
+            let t = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+                self?.tickCat()
+            }
+            RunLoop.main.add(t, forMode: .common)
+            catTimer = t
+        } else {
+            catTimer?.invalidate()
+            catTimer = nil
+            extra.catTick = 0
+        }
+    }
+
+    func tickCat() {
+        extra.catTick += 1
+        guard let button = item?.button else { return }
+        button.effectiveAppearance.performAsCurrentDrawingAppearance {
+            button.image = extra.makeImage()
+        }
+        if dropOpen { holdHighlight() }
     }
 
     func holdHighlight() {
@@ -370,6 +401,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             case "battery":
                 let n = Int((min(1, max(0, s.battCharge)) * 100).rounded())
                 return MenuChip(label: "BAT", value: "\(n)", batteryFrac: s.battCharge, charging: s.charging)
+            case "cat":
+                return MenuChip(label: "CAT", value: "", isCat: true)
             default: return nil
             }
         }
@@ -392,6 +425,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         h = min(h, 780)
         positionDrop(NSSize(width: 268, height: h))
         for c in catchers { drop.order(.above, relativeTo: c.windowNumber) }
+        refreshCardFrames(host.view)
+        if dropOpen { pickHover() }
         if panel != nil { showDetail() } else { hideDetail() }
     }
 
@@ -671,12 +706,30 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         let lv: NSWindow.Level = on ? .popUpMenu : .statusBar
         drop?.level = lv
         detail?.level = lv
-        if on, dropOpen {
-            drop.orderFrontRegardless()
-            if detail.isVisible { detail.orderFrontRegardless() }
-            settingsWC?.window?.makeKey()
-            drop.orderFrontRegardless()
-            if detail.isVisible { detail.orderFrontRegardless() }
+        if on {
+            settingsWC?.window?.level = .statusBar
+            onboardingWC?.window?.level = .statusBar
+            restackChrome()
+        } else {
+            settingsWC?.window?.level = .normal
+            onboardingWC?.window?.level = .normal
+        }
+    }
+
+    func restackChrome() {
+        guard drop != nil else { return }
+        for c in catchers {
+            c.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue - 1)
+            drop.order(.above, relativeTo: c.windowNumber)
+            if detail.isVisible { detail.order(.above, relativeTo: c.windowNumber) }
+        }
+        if let sw = settingsWC?.window, sw.isVisible {
+            drop.order(.above, relativeTo: sw.windowNumber)
+            if detail.isVisible { detail.order(.above, relativeTo: sw.windowNumber) }
+        }
+        if let ow = onboardingWC?.window, ow.isVisible {
+            drop.order(.above, relativeTo: ow.windowNumber)
+            if detail.isVisible { detail.order(.above, relativeTo: ow.windowNumber) }
         }
     }
 
@@ -687,7 +740,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             let changed = panel != v
             panel = v
             if changed || detail?.isVisible != true {
-                DispatchQueue.main.async { self.showDetail() }
+                showDetail()
             }
             return
         }
@@ -767,8 +820,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         refreshMenu()
         sizePopover()
         drop.orderFrontRegardless()
+        host.view.layoutSubtreeIfNeeded()
+        refreshCardFrames(host.view)
         startClickMon()
-        if settingsWC?.window?.isVisible == true {
+        if settingsWC?.window?.isVisible == true || onboardingWC?.window?.isVisible == true {
             pinHudAboveSettings(true)
         }
     }
@@ -807,19 +862,13 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             p.backgroundColor = NSColor.black.withAlphaComponent(1.0 / 255.0)
             p.hasShadow = false
             p.ignoresMouseEvents = false
-            p.level = NSWindow.Level(rawValue: drop.level.rawValue - 1)
+            p.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue - 1)
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
             p.hidesOnDeactivate = false
             p.isFloatingPanel = true
             let v = CatcherView(frame: NSRect(origin: .zero, size: s.frame.size))
             v.autoresizingMask = [.width, .height]
             v.onDown = { [weak self] in self?.closeIfOutside() }
-            v.shouldPassThrough = { [weak self] pt in
-                guard let self else { return false }
-                if let sw = self.settingsWC?.window, sw.isVisible, sw.frame.contains(pt) { return true }
-                if let ow = self.onboardingWC?.window, ow.isVisible, ow.frame.contains(pt) { return true }
-                return false
-            }
             p.contentView = v
             p.setFrame(s.frame, display: false)
             p.orderFrontRegardless()
@@ -829,6 +878,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             drop.order(.above, relativeTo: c.windowNumber)
             if detail.isVisible { detail.order(.above, relativeTo: c.windowNumber) }
         }
+        restackChrome()
         startHoverMon()
         dropClickMon = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] e in
             guard let self else { return e }
@@ -891,11 +941,15 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func pickHover() {
         guard dropOpen else { return }
         let loc = NSEvent.mouseLocation
-        if detail.isVisible, detail.frame.contains(loc) {
+        // Gap between main plate and detail is 6pt — keep the side panel alive while crossing it.
+        if detail.isVisible, detail.frame.insetBy(dx: -8, dy: -8).contains(loc) {
             if let panel { setPanel(panel) }
             return
         }
-        if let id = cardFrames.first(where: { $0.value.contains(loc) })?.key {
+        let hit = cardFrames
+            .filter { $0.value.contains(loc) && drop.frame.intersects($0.value) }
+            .min(by: { $0.value.width * $0.value.height < $1.value.width * $1.value.height })
+        if let id = hit?.key {
             setPanel(id)
             return
         }
@@ -1061,15 +1115,7 @@ final class DropPanel: NSPanel {
 
 final class CatcherView: NSView {
     var onDown: (() -> Void)?
-    var shouldPassThrough: ((NSPoint) -> Bool)?
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let screenPoint = window?.convertPoint(toScreen: point) ?? point
-        if let shouldPassThrough, shouldPassThrough(screenPoint) {
-            return nil
-        }
-        return self
-    }
     override func draw(_ dirtyRect: NSRect) {
         NSColor.black.withAlphaComponent(1.0 / 255.0).setFill()
         bounds.fill()
@@ -1085,23 +1131,28 @@ struct MenuChip: Equatable {
     var batteryFrac: Double? = nil
     var charging = false
     var isNet = false
+    var isCat = false
 }
 
 final class ExtraView: NSView {
     var chips: [MenuChip] = []
     var flashColor: NSColor?
     var flashAlpha: CGFloat = 0
+    var catTick = 0
+    var catAnimated = true
     override var isOpaque: Bool { false }
     override var isFlipped: Bool { true }
 
     func makeImage() -> NSImage {
         let size = NSSize(width: fittingWidth, height: max(bounds.height, 22))
-        return NSImage(size: size, flipped: true) { rect in
-            NSColor.clear.set()
-            rect.fill(using: .copy)
-            self.draw(rect)
-            return true
-        }
+        let img = NSImage(size: size)
+        img.lockFocusFlipped(true)
+        NSGraphicsContext.current?.imageInterpolation = .none
+        NSColor.clear.set()
+        NSRect(origin: .zero, size: size).fill(using: .copy)
+        draw(NSRect(origin: .zero, size: size))
+        img.unlockFocus()
+        return img
     }
 
     // ponytail: name/% stack; battery = Stats xl 26×14, width 30 either way
@@ -1131,6 +1182,7 @@ final class ExtraView: NSView {
     }
 
     func chipWidth(_ c: MenuChip) -> CGFloat {
+        if c.isCat { return 21 }
         if c.batteryFrac != nil { return 30 }
         if c.isNet { return 66 }
         let lw = (c.label as NSString).size(withAttributes: labelAttrs).width
@@ -1142,9 +1194,17 @@ final class ExtraView: NSView {
         return ceil(max(lw, vw) + 2)
     }
 
+    private let catGap: CGFloat = 14
+
     var fittingWidth: CGFloat {
         guard !chips.isEmpty else { return 40 }
-        return chips.map(chipWidth).reduce(0, +) + CGFloat(chips.count - 1) * gap + 4
+        var w = chips.map(chipWidth).reduce(0, +) + 4
+        for (i, c) in chips.enumerated() {
+            if i < chips.count - 1 {
+                w += c.isCat ? catGap : gap
+            }
+        }
+        return w
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1158,9 +1218,11 @@ final class ExtraView: NSView {
         let labelH: CGFloat = 9
         let opts: NSString.DrawingOptions = [.usesLineFragmentOrigin]
         var x: CGFloat = 2
-        for c in chips {
+        for (i, c) in chips.enumerated() {
             let cw = chipWidth(c)
-            if let frac = c.batteryFrac {
+            if c.isCat {
+                drawCat(NSRect(x: x, y: 0, width: cw, height: bounds.height))
+            } else if let frac = c.batteryFrac {
                 drawBattery(NSRect(x: x, y: 0, width: cw, height: bounds.height), frac: frac, text: c.value, charging: c.charging)
             } else if c.isNet {
                 let half = floor(bounds.height / 2)
@@ -1170,7 +1232,525 @@ final class ExtraView: NSView {
                 (c.label as NSString).draw(with: NSRect(x: x, y: 0, width: cw, height: labelH), options: opts, attributes: labelAttrs)
                 (c.value as NSString).draw(with: NSRect(x: x, y: labelH, width: cw, height: bounds.height - labelH), options: opts, attributes: valueAttrs)
             }
-            x += cw + gap
+            let g = (c.isCat && i < chips.count - 1) ? catGap : gap
+            x += cw + g
+        }
+    }
+
+    // ponytail: 22×22 @ 1pt orange sitting tabby. No shadow.
+    var catFrame: Int {
+        guard catAnimated else { return 0 }
+        let t = catTick % 1000
+        if t < 495 {
+            let sub = t % 125
+            if (10...12).contains(sub) { return 1 }
+            if (22...28).contains(sub) {
+                return (23...26).contains(sub) ? 8 : 7
+            }
+            if (38...53).contains(sub) {
+                switch sub - 38 {
+                case 0, 1, 12, 13: return 2
+                case 4, 5, 8, 9:   return 10
+                case 6, 7:         return 11
+                default:           return 0
+                }
+            }
+            if (60...72).contains(sub) {
+                switch sub {
+                case 60, 61, 72: return 5
+                case 62...65, 70, 71: return 6
+                case 66...69: return 9
+                default: return 0
+                }
+            }
+            return 0
+        }
+        if t < 500 { return 16 }
+        if t < 995 {
+            let sleepSub = (t - 500) % 60
+            if sleepSub < 36 { return 17 }
+            if (36..<44).contains(sleepSub) { return 18 }
+            if (44..<52).contains(sleepSub) { return 19 }
+            return 18
+        }
+        return 16
+    }
+
+    private static let catIdle = [
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOKKOOOOKKOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOOKKKOOOOK..",
+        "......KKKOOOOOOOOK...",
+        "..KK...KDDOOOOOODK...",
+        ".KOOK..KDOOOLLOOODK..",
+        ".KDDK..KDDOOLLLLODK..",
+        ".KOOK..KDDOOLLLLODK..",
+        "KDDK..KDOOOOLLLLODK..",
+        "KOOK..KDDOOOLLLOODK..",
+        "KDDK.KDOOODOOOKOODK..",
+        "KOOK.KDDDOKDDOKODDK..",
+        "KDDK.KDDDOKDDOKODDK..",
+        "KOODKKOOOOKOOOKOODK..",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKDOOKDOODKODDK..",
+        "......KKKKKKKKKKKKK.."
+    ]
+
+    private static let catBlink = [
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOOKKKOOOOK..",
+        "......KKKOOOOOOOOK...",
+        "..KK...KDDOOOOOODK...",
+        ".KOOK..KDOOOLLOOODK..",
+        ".KDDK..KDDOOLLLLODK..",
+        ".KOOK..KDDOOLLLLODK..",
+        "KDDK..KDOOOOLLLLODK..",
+        "KOOK..KDDOOOLLLOODK..",
+        "KDDK.KDOOODOOOKOODK..",
+        "KOOK.KDDDOKDDOKODDK..",
+        "KDDK.KDDDOKDDOKODDK..",
+        "KOODKKOOOOKOOOKOODK..",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKDOOKDOODKODDK..",
+        "......KKKKKKKKKKKKK.."
+    ]
+
+    private static let catTailWaveLeft = [
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOKKOOOOKKOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOOKKKOOOOK..",
+        "......KKKOOOOOOOOK...",
+        ".KK....KDDOOOOOODK...",
+        "KOOK...KDOOOLLOOODK..",
+        "KDDK...KDDOOLLLLODK..",
+        "KOOK...KDDOOLLLLODK..",
+        "KDDK..KDOOOOLLLLODK..",
+        "KOOK..KDDOOOLLLOODK..",
+        "KDDK.KDOOODOOOKOODK..",
+        "KOOK.KDDDOKDDOKODDK..",
+        "KDDK.KDDDOKDDOKODDK..",
+        "KOODKKOOOOKOOOKOODK..",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKDOOKDOODKODDK..",
+        "......KKKKKKKKKKKKK.."
+    ]
+
+    private static let catEarDrag1 = [
+        ".......KK........KK..",
+        "......KOOK.......KKK.",
+        "......KODOK.....KODOK",
+        "......KODDOKKKKKODDOK",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOKKOOOOKKOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOOKKKOOOOK..",
+        "......KKKOOOOOOOOK...",
+        "..KK...KDDOOOOOODK...",
+        ".KOOK..KDOOOLLOOODK..",
+        ".KDDK..KDDOOLLLLODK..",
+        ".KOOK..KDDOOLLLLODK..",
+        "KDDK..KDOOOOLLLLODK..",
+        "KOOK..KDDOOOLLLOODK..",
+        "KDDK.KDOOODOOOKOODK..",
+        "KOOK.KDDDOKDDOKODDK..",
+        "KDDK.KDDDOKDDOKODDK..",
+        "KOODKKOOOOKOOOKOODK..",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKDOOKDOODKODDK..",
+        "......KKKKKKKKKKKKK.."
+    ]
+
+    private static let catEarDrag2 = [
+        ".......KK............",
+        "......KOOK.......KK..",
+        "......KODOK....KKDOK.",
+        "......KODDOKKKKOOODK.",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOKKOOOOOOOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOOKKKOOOOK..",
+        "......KKKOOOOOOOOK...",
+        "..KK...KDDOOOOOODK...",
+        ".KOOK..KDOOOLLOOODK..",
+        ".KDDK..KDDOOLLLLODK..",
+        ".KOOK..KDDOOLLLLODK..",
+        "KDDK..KDOOOOLLLLODK..",
+        "KOOK..KDDOOOLLLOODK..",
+        "KDDK.KDOOODOOOKOODK..",
+        "KOOK.KDDDOKDDOKODDK..",
+        "KDDK.KDDDOKDDOKODDK..",
+        "KOODKKOOOOKOOOKOODK..",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKDOOKDOODKODDK..",
+        "......KKKKKKKKKKKKK.."
+    ]
+
+    private static let catLick1 = [
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOKTTKOOOOK..",
+        "......KKKOOOOOOOOK...",
+        "..KK...KDDOOOOOODK...",
+        ".KOOK..KDOOOLLOOODK..",
+        ".KDDK..KDDOOLLLLODK..",
+        ".KOOK..KDDOOLLLLODK..",
+        "KDDK..KDOOOOLLLLODK..",
+        "KOOK..KDDOOOLLLOODK..",
+        "KDDK.KDOOODOOOKOODK..",
+        "KOOK.KDDDOKDDOKODDK..",
+        "KDDK.KDDDOKDDOKODDK..",
+        "KOODKKOOOOKOOOKOODK..",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKDOOKDOODKODDK..",
+        "......KKKKKKKKKKKKK.."
+    ]
+
+    private static let catLick2 = [
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOKTTKOOOOK..",
+        "......KKKOOTTTOOOK...",
+        "..KK...KDDOOTTOODK...",
+        ".KOOK..KDOOOLLOOODK..",
+        ".KDDK..KDDOOLLLLODK..",
+        ".KOOK..KDDOOLLLLODK..",
+        "KDDK..KDOOOOLLLLODK..",
+        "KOOK..KDDOOOLLLOODK..",
+        "KDDK.KDOOODOOOKOODK..",
+        "KOOK.KDDDOKDDOKODDK..",
+        "KDDK.KDDDOKDDOKODDK..",
+        "KOODKKOOOOKOOOKOODK..",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKDOOKDOODKODDK..",
+        "......KKKKKKKKKKKKK.."
+    ]
+
+    private static let catLick3 = [
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOTTTTOOOOK..",
+        "......KKKOOOOOOOOK...",
+        "..KK...KDDOOOOOODK...",
+        ".KOOK..KDOOOLLOOODK..",
+        ".KDDK..KDDOOLLLLODK..",
+        ".KOOK..KDDOOLLLLODK..",
+        "KDDK..KDOOOOLLLLODK..",
+        "KOOK..KDDOOOLLLOODK..",
+        "KDDK.KDOOODOOOKOODK..",
+        "KOOK.KDDDOKDDOKODDK..",
+        "KDDK.KDDDOKDDOKODDK..",
+        "KOODKKOOOOKOOOKOODK..",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKDOOKDOODKODDK..",
+        "......KKKKKKKKKKKKK.."
+    ]
+
+    private static let catTailWaveRight = [
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOKKOOOOKKOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOOKKKOOOOK..",
+        "......KKKOOOOOOOOK...",
+        "...KK..KDDOOOOOODK...",
+        "..KOOK.KDOOOLLOOODK..",
+        "..KDDK.KDDOOLLLLODK..",
+        "..KOOK.KDDOOLLLLODK..",
+        ".KDDK.KDOOOOLLLLODK..",
+        "KOOK..KDDOOOLLLOODK..",
+        "KDDK.KDOOODOOOKOODK..",
+        "KOOK.KDDDOKDDOKODDK..",
+        "KDDK.KDDDOKDDOKODDK..",
+        "KOODKKOOOOKOOOKOODK..",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKDOOKDOODKODDK..",
+        "......KKKKKKKKKKKKK.."
+    ]
+
+    private static let catTailWaveTip = [
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOKKOOOOKKOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOOKKKOOOOK..",
+        "......KKKOOOOOOOOK...",
+        "....KK.KDDOOOOOODK...",
+        "...KOOKKDOOOLLOOODK..",
+        "..KDDK.KDDOOLLLLODK..",
+        "..KOOK.KDDOOLLLLODK..",
+        ".KDDK.KDOOOOLLLLODK..",
+        "KOOK..KDDOOOLLLOODK..",
+        "KDDK.KDOOODOOOKOODK..",
+        "KOOK.KDDDOKDDOKODDK..",
+        "KDDK.KDDDOKDDOKODDK..",
+        "KOODKKOOOOKOOOKOODK..",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKDOOKDOODKODDK..",
+        "......KKKKKKKKKKKKK.."
+    ]
+
+    private static let catLieDownTransition = [
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        ".....KKODDOKKKKODDOK.",
+        "....KKODDODODODDDOKK.",
+        "...KDOOODODODODOODKDK",
+        "..KDOOOOOOOOOOOOOOODK",
+        "..KDOOOOOOOOOOOOOOODK",
+        "..KDOOOOOOOOOOOOOOODK",
+        ".KKDOKKOOOOKKODKKODKK",
+        ".KDOOOOOOKKOOOOOOODDK",
+        "KKDDOOOKOOOOOODKKODDK",
+        "KOOOOKKKOOOOKK.KKODDK",
+        "KKKOOOOOOOOK...KKODDK",
+        ".KDDOOLLOOODK..KKODDK",
+        ".KDDOOLLLLODK...KODDK",
+        ".KDDOOLLLLODK...KODDK",
+        "KDOOOOLLLLODK..KKODDK",
+        "KDDOOOLLLOODK..KKODDK",
+        "KDDDDKOOOOKDDOOKODDK.",
+        ".KDDKDODDKDOOOKOOODK.",
+        "..KKKKKKKKKKKKKKKKK..",
+        "....................."
+    ]
+
+    private static let catSleepPoseA = [
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "....KKKODDOKKKKODDOKK",
+        "...KDDDKDDODODODDDODK",
+        "..KDOOOKDOOODODODOODK",
+        ".KDOOOOKOOOOOOOOOOOOD",
+        "KDOOOOOOOOOOOOOOOOOOD",
+        "KDOOOOOOOOOOOOOOOOOOD",
+        "KDOOOOOODOKKOOOOKKODK",
+        "KDOOOOOOOOOOOKKOOOOOD",
+        "KDDOOOOODDDOOOKOOOOOD",
+        "KOOKKDOOOOOOKKKOOOOOD",
+        "KDDKKDOOOOOOOOOOOOODK",
+        "KOODKKDDOOLLLLLLODKOD",
+        "KDDDDKKDOODKDDODKKKK.",
+        ".KDDKDODDKDOOOKODDK..",
+        "..KKKKKKKKKKKKKKKKK.."
+    ]
+
+    private static let catSleepPoseB = [
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "....KKKODDOKKKKODDOKK",
+        "...KDDDKDDODODODDDODK",
+        "..KDOOOKDOOODODODOODK",
+        ".KDOOOOKOOOOOOOOOOOOD",
+        "KDOOOOOOOOOOOOOOOOOOD",
+        "KDOOOOOOOOOOOOOOOOOOD",
+        "KDOOOOOODOKKOOOOKKODK",
+        "KDOOOOOOOOOOOKKOOOOOD",
+        "KDDOOOOODDDOOOKOOOOOD",
+        "...KKDOOOOOOKKKOOOOOD",
+        ".KOOKDOOOOOOOOOOOOODK",
+        "KDDKKKDDOOLLLLLLODKOD",
+        "KOODKKKDOODKDDODKKKK.",
+        "KDDDDKDODDKDOOOKODDK.",
+        ".KKKKKKKKKKKKKKKKKK.."
+    ]
+
+    private static let catSleepPoseC = [
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".....................",
+        ".......KK........KK..",
+        "......KOOK......KOOK.",
+        "......KODOK....KODOK.",
+        "....KKKODDOKKKKODDOKK",
+        "...KDDDKDDODODODDDODK",
+        "..KDOOOKDOOODODODOODK",
+        ".KDOOOOKOOOOOOOOOOOOD",
+        "KDOOOOOOOOOOOOOOOOOOD",
+        "KDOOOOOOOOOOOOOOOOOOD",
+        "KDOOOOOODOKKOOOOKKODK",
+        "KDOOOOOOOOOOOKKOOOOOD",
+        "KDDOOOOODDDOOOKOOOOOD",
+        "KDDOOOOODDDOOOKOOOOOD",
+        "......KOOOOOOOOOOOODK",
+        "...KK.KDDOOLLLLLLODKD",
+        ".KOODKKDOODKDDODKKKK.",
+        "KDDDDKDODDKDOOOKODDK.",
+        ".KKKKKKKKKKKKKKKKKK.."
+    ]
+
+    private func currentCatSprite() -> [String] {
+        switch catFrame {
+        case 1: return Self.catBlink
+        case 2: return Self.catTailWaveLeft
+        case 5: return Self.catLick1
+        case 6: return Self.catLick2
+        case 7: return Self.catEarDrag1
+        case 8: return Self.catEarDrag2
+        case 9: return Self.catLick3
+        case 10: return Self.catTailWaveRight
+        case 11: return Self.catTailWaveTip
+        case 16: return Self.catLieDownTransition
+        case 17: return Self.catSleepPoseA
+        case 18: return Self.catSleepPoseB
+        case 19: return Self.catSleepPoseC
+        default: return Self.catIdle
+        }
+    }
+
+    private func drawCat(_ r: NSRect) {
+        let sprite = currentCatSprite()
+        let rows = CGFloat(sprite.count)
+        let cols = CGFloat(sprite.first?.count ?? 21)
+        let maxH: CGFloat = 21.0
+        let s = min(maxH / rows, (r.width - 2) / cols)
+        let ox = (r.minX + (r.width - cols * s) / 2).rounded()
+        let oy = (r.minY + (r.height - rows * s) / 2).rounded()
+        let outline = NSColor(srgbRed: 0.14, green: 0.13, blue: 0.17, alpha: 1)
+        let orange = NSColor(srgbRed: 0.97, green: 0.58, blue: 0.19, alpha: 1)
+        let dark = NSColor(srgbRed: 0.85, green: 0.41, blue: 0.14, alpha: 1)
+        let light = NSColor(srgbRed: 0.98, green: 0.73, blue: 0.41, alpha: 1)
+        let tongue = NSColor(srgbRed: 0.93, green: 0.33, blue: 0.39, alpha: 1)
+        let map: [Character: NSColor] = [
+            "K": outline, "O": orange, "D": dark, "L": light, "T": tongue
+        ]
+        for (j, row) in sprite.enumerated() {
+            for (i, ch) in row.enumerated() {
+                guard let color = map[ch] else { continue }
+                color.setFill()
+                NSRect(x: ox + CGFloat(i) * s, y: oy + CGFloat(j) * s, width: s, height: s).fill()
+            }
         }
     }
 
@@ -1463,32 +2043,40 @@ struct ScreenFrame: NSViewRepresentable {
         DispatchQueue.main.async { v.save() }
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: FrameProbe, context: Context) -> CGSize {
-        proposal.replacingUnspecifiedDimensions()
+        CGSize(width: proposal.width ?? 256, height: proposal.height ?? 80)
     }
 }
 
 final class FrameProbe: NSView {
     var id: App.Panel?
-    override func hitTest(_ point: NSPoint) -> NSView? { self }
+    // Hits pass through to CPU segments / header chips. Hover uses tracking + pickHover.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        updateTrackingAreas()
-        DispatchQueue.main.async { [weak self] in self?.save() }
+        if window == nil {
+            if let id { App.shared.cardFrames.removeValue(forKey: id) }
+            trackingAreas.forEach(removeTrackingArea)
+            return
+        }
+        armTracking()
+        save()
     }
     override func layout() {
         super.layout()
         save()
-        updateTrackingAreas()
     }
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         save()
-        updateTrackingAreas()
     }
     override func updateTrackingAreas() {
-        trackingAreas.forEach(removeTrackingArea)
+        super.updateTrackingAreas()
+        armTracking()
+    }
+    private func armTracking() {
+        if trackingAreas.contains(where: { $0.owner === self }) { return }
         addTrackingArea(NSTrackingArea(
-            rect: bounds,
+            rect: .zero,
             options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
             owner: self,
             userInfo: nil
@@ -1496,13 +2084,14 @@ final class FrameProbe: NSView {
     }
     override func mouseEntered(with event: NSEvent) {
         save()
-        if let id { App.shared.setPanel(id) }
+        App.shared.pickHover()
     }
     override func mouseMoved(with event: NSEvent) {
-        if let id { App.shared.setPanel(id) }
+        App.shared.pickHover()
     }
     override func mouseExited(with event: NSEvent) {
-        App.shared.setPanel(nil)
+        // Layout/rebuild synthesizes exited while the cursor is still on the card.
+        App.shared.pickHover()
     }
     func save() {
         guard let id, let w = window, bounds.width > 1, bounds.height > 1 else { return }
@@ -2804,7 +3393,13 @@ struct Card<Content: View, HeaderTrailing: View>: View {
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(active ? pal.cardHover : pal.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay { if let panel { ScreenFrame(id: panel) } }
+        .overlay {
+            if let panel {
+                ScreenFrame(id: panel)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 }
 
@@ -3096,22 +3691,32 @@ final class CPULoadView: NSView {
     override var isOpaque: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(point) ? self : nil }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            trackingAreas.forEach(removeTrackingArea)
+            hover = 0
+            return
+        }
+        armTracking()
+    }
     override func updateTrackingAreas() {
-        trackingAreas.forEach(removeTrackingArea)
+        super.updateTrackingAreas()
+        armTracking()
+    }
+    private func armTracking() {
+        if trackingAreas.contains(where: { $0.owner === self }) { return }
         addTrackingArea(NSTrackingArea(
-            rect: bounds,
+            rect: .zero,
             options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
             owner: self,
             userInfo: nil
         ))
     }
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        updateTrackingAreas()
-    }
-    override func layout() {
-        super.layout()
-        updateTrackingAreas()
+    private func pointerInside() -> Bool {
+        guard let w = window else { return false }
+        let p = convert(w.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+        return bounds.contains(p)
     }
     override func mouseMoved(with event: NSEvent) {
         let x = convert(event.locationInWindow, from: nil).x
@@ -3120,7 +3725,10 @@ final class CPULoadView: NSView {
     override func mouseEntered(with event: NSEvent) {
         mouseMoved(with: event)
     }
-    override func mouseExited(with event: NSEvent) { hover = 0 }
+    override func mouseExited(with event: NSEvent) {
+        if pointerInside() { return }
+        hover = 0
+    }
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow == nil { hideTip() }
         super.viewWillMove(toWindow: newWindow)
