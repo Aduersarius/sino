@@ -42,6 +42,11 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var lpmBusy = false
     @Published var fetchingIP = false
     @Published var confirmingKillPid: pid_t? = nil
+    @Published var vanish: [pid_t: Date] = [:]
+    @Published var vanishGhosts: [pid_t: ProcSample] = [:]
+    @Published var killedIds: Set<pid_t> = []
+    @Published var procQuery = ""
+    @Published var procSearchFocused = false
     var activeKillButton: NSView?
     @Published var isAwakeActive = false
     @Published var awakeRemainingSeconds: Int? = nil // nil = indefinite
@@ -51,7 +56,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     private var fanHold: Timer?
     private var awakeAssertionID: IOPMAssertionID = 0
     private var awakeTimer: Timer? = nil
-    enum Panel: Equatable { case cpu, ram, storage, net, fans, battery, gpu }
+    enum Panel: String, Equatable, CaseIterable { case cpu, ram, storage, net, fans, battery, gpu }
     // ponytail: screen rect of each main-column card → detail Y
     var cardFrames: [Panel: NSRect] = [:]
 
@@ -206,7 +211,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     func makeGlass(_ vc: NSViewController, size: NSSize) -> NSPanel {
         vc.view.wantsLayer = true
-        vc.view.layer?.backgroundColor = NSColor.clear.cgColor
+        vc.view.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.01).cgColor
         vc.view.layer?.cornerRadius = 10
         vc.view.layer?.cornerCurve = .continuous
         vc.view.layer?.masksToBounds = true
@@ -218,7 +223,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             defer: false
         )
         p.isOpaque = false
-        p.backgroundColor = .clear
+        p.backgroundColor = NSColor.black.withAlphaComponent(1.0 / 255.0)
         p.hasShadow = true
         p.level = .statusBar
         p.isFloatingPanel = true
@@ -268,7 +273,13 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             button.isHighlighted = false
             button.highlight(false)
         }
-        if dropOpen { sizePopover() }
+        if dropOpen {
+            if !killedIds.isEmpty {
+                let live = Set(sampler.snap.memProcesses.map(\.id))
+                killedIds = killedIds.filter { live.contains($0) }
+            }
+            sizePopover()
+        }
     }
 
     func armCatAnim() {
@@ -753,8 +764,20 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
-    func quitPid(_ pid: pid_t) {
-        quitPids([pid])
+    func snapKill(_ p: ProcSample) {
+        confirmingKillPid = nil
+        activeKillButton = nil
+        vanish[p.id] = Date()
+        vanishGhosts[p.id] = p
+        killedIds.insert(p.id)
+        quitPids(p.pids.isEmpty ? [p.id] : p.pids)
+        let id = p.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                self?.vanish.removeValue(forKey: id)
+                self?.vanishGhosts.removeValue(forKey: id)
+            }
+        }
     }
 
     func quitPids(_ pids: [pid_t]) {
@@ -810,9 +833,49 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    // ponytail: first orderFront of a never-shown transparent NSPanel has no WindowServer hit mask.
+    // User's first open must be the second orderFront. Off-screen + alpha 0 so it doesn't flash.
+    func primeHUD(_ p: NSPanel) {
+        p.alphaValue = 0
+        p.setFrame(NSRect(x: -8000, y: -8000, width: 268, height: 400), display: true)
+        p.orderFrontRegardless()
+        p.displayIfNeeded()
+        p.orderOut(nil)
+        p.alphaValue = 1
+    }
+
+    func hudAtPointer() -> NSPanel? {
+        let loc = NSEvent.mouseLocation
+        if drop.frame.contains(loc) { return drop }
+        if detail.isVisible, detail.frame.contains(loc) { return detail }
+        return nil
+    }
+
+    private var forwardingClick = false
+
+    func forwardClick(_ e: NSEvent, to w: NSPanel) {
+        guard !forwardingClick else { return }
+        forwardingClick = true
+        defer { forwardingClick = false }
+        let pt = w.convertPoint(fromScreen: NSEvent.mouseLocation)
+        guard let ev = NSEvent.mouseEvent(
+            with: e.type,
+            location: pt,
+            modifierFlags: e.modifierFlags,
+            timestamp: e.timestamp,
+            windowNumber: w.windowNumber,
+            context: nil,
+            eventNumber: e.eventNumber,
+            clickCount: e.clickCount,
+            pressure: 1
+        ) else { return }
+        w.sendEvent(ev)
+    }
+
     func showDrop() {
         guard !dropOpen else { return }
-        ignoreClicksUntil = Date().addingTimeInterval(0.1)
+        cardFrames.removeAll()
+        ignoreClicksUntil = Date().addingTimeInterval(0.35)
         dropOpen = true
         refreshLowPowerMode()
         sampler.runHeavy()
@@ -820,9 +883,20 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         refreshMenu()
         sizePopover()
         drop.orderFrontRegardless()
+        host.rootView = Dashboard(app: self, mode: .main)
+        finishShow(clicks: true)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.dropOpen else { return }
+            self.sizePopover()
+            self.restackChrome()
+        }
+    }
+
+    func finishShow(clicks: Bool) {
         host.view.layoutSubtreeIfNeeded()
+        sizePopover()
         refreshCardFrames(host.view)
-        startClickMon()
+        if clicks { startClickMon() }
         if settingsWC?.window?.isVisible == true || onboardingWC?.window?.isVisible == true {
             pinHudAboveSettings(true)
         }
@@ -841,6 +915,14 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         pinHudAboveSettings(false)
         TooltipManager.shared.hideImmediately()
         hideDetail()
+        cardFrames.removeAll()
+        procQuery = ""
+        procSearchFocused = false
+        vanish.removeAll()
+        vanishGhosts.removeAll()
+        killedIds.removeAll()
+        procFieldHost.field.removeFromSuperview()
+        if let p = detail as? DropPanel { p.allowKey = false }
         drop.orderOut(nil)
         panel = nil
         dropOpen = false
@@ -848,6 +930,37 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         item.button?.isHighlighted = false
         item.button?.highlight(false)
         stopClickMon()
+    }
+
+    private lazy var procFieldHost = ProcFieldHost()
+
+    func focusProcSearch(from pad: NSView) {
+        guard dropOpen, let win = pad.window ?? detail else { return }
+        procSearchFocused = true
+        if let p = win as? DropPanel {
+            p.allowKey = true
+            p.becomesKeyOnlyIfNeeded = false
+        }
+        win.makeKey()
+        let f = procFieldHost.field
+        f.stringValue = procQuery
+        f.textColor = .clear
+        f.backgroundColor = .clear
+        f.alphaValue = 0
+        guard let cv = win.contentView else { return }
+        f.frame = pad.convert(pad.bounds, to: cv)
+        if f.superview !== cv { cv.addSubview(f) }
+        win.makeFirstResponder(f)
+        if let tv = f.currentEditor() as? NSTextView {
+            tv.insertionPointColor = .clear
+        }
+    }
+
+    func blurProcSearch() {
+        procQuery = ""
+        procSearchFocused = false
+        procFieldHost.field.removeFromSuperview()
+        if let p = detail as? DropPanel { p.allowKey = false }
     }
 
     func startClickMon() {
@@ -868,37 +981,52 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             p.isFloatingPanel = true
             let v = CatcherView(frame: NSRect(origin: .zero, size: s.frame.size))
             v.autoresizingMask = [.width, .height]
-            v.onDown = { [weak self] in self?.closeIfOutside() }
+            v.onDown = { [weak self] in
+                guard let self else { return }
+                let loc = NSEvent.mouseLocation
+                if self.drop.frame.contains(loc) { return }
+                if self.detail.isVisible, self.detail.frame.contains(loc) { return }
+                self.closeIfOutside()
+            }
             p.contentView = v
             p.setFrame(s.frame, display: false)
             p.orderFrontRegardless()
             return p
         }
         for c in catchers {
-            drop.order(.above, relativeTo: c.windowNumber)
-            if detail.isVisible { detail.order(.above, relativeTo: c.windowNumber) }
+            c.order(.below, relativeTo: drop.windowNumber)
+            if detail.isVisible { c.order(.below, relativeTo: detail.windowNumber) }
         }
         restackChrome()
         startHoverMon()
-        dropClickMon = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] e in
+        dropClickMon = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseUp]) { [weak self] e in
             guard let self else { return e }
+            if self.forwardingClick { return e }
+            if let w = self.hudAtPointer(), e.window !== w {
+                self.forwardClick(e, to: w)
+                return nil
+            }
             if self.confirmingKillPid != nil {
                 if let btn = self.activeKillButton, let win = btn.window, e.window == win {
+                    let hit = win.contentView?.hitTest(e.locationInWindow)
                     let loc = btn.convert(e.locationInWindow, from: nil)
-                    if !btn.bounds.contains(loc) {
+                    let onBtn = (hit === btn) || (hit?.isDescendant(of: btn) == true) || btn.bounds.insetBy(dx: -4, dy: -4).contains(loc)
+                    if !onBtn {
                         withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                             self.confirmingKillPid = nil
                             self.activeKillButton = nil
                         }
                     }
-                } else {
+                } else if e.window !== self.drop && e.window !== self.detail {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                         self.confirmingKillPid = nil
                         self.activeKillButton = nil
                     }
                 }
             }
-            self.closeIfOutside()
+            if e.window !== self.drop, e.window !== self.detail {
+                self.closeIfOutside()
+            }
             return e
         }
     }
@@ -946,12 +1074,12 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             if let panel { setPanel(panel) }
             return
         }
-        let hit = cardFrames
-            .filter { $0.value.contains(loc) && drop.frame.intersects($0.value) }
-            .min(by: { $0.value.width * $0.value.height < $1.value.width * $1.value.height })
-        if let id = hit?.key {
-            setPanel(id)
-            return
+        for idStr in prefs.dropOrder {
+            guard prefs.drop.contains(idStr), let p = Panel(rawValue: idStr) else { continue }
+            if let frame = cardFrames[p], frame.contains(loc), drop.frame.intersects(frame) {
+                setPanel(p)
+                return
+            }
         }
         setPanel(nil)
     }
@@ -1020,7 +1148,7 @@ final class SettingsWindow: NSWindow {
             w.isReleasedWhenClosed = false
             w.acceptsMouseMovedEvents = true
             w.isMovableByWindowBackground = true
-            w.backgroundColor = NSColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1.0)
+            w.backgroundColor = .windowBackgroundColor
             w.minSize = NSSize(width: 640, height: 520)
             w.maxSize = NSSize(width: 640, height: 1200)
             w.setContentSize(NSSize(width: 640, height: 680))
@@ -1109,7 +1237,8 @@ final class HotKeyManager {
 }
 
 final class DropPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
+    var allowKey = false
+    override var canBecomeKey: Bool { allowKey }
     override var canBecomeMain: Bool { false }
 }
 
@@ -1595,26 +1724,26 @@ final class ExtraView: NSView {
         ".......KK........KK..",
         "......KOOK......KOOK.",
         "......KODOK....KODOK.",
-        ".....KKODDOKKKKODDOK.",
-        "....KKODDODODODDDOKK.",
-        "...KDOOODODODODOODKDK",
-        "..KDOOOOOOOOOOOOOOODK",
-        "..KDOOOOOOOOOOOOOOODK",
-        "..KDOOOOOOOOOOOOOOODK",
-        ".KKDOKKOOOOKKODKKODKK",
-        ".KDOOOOOOKKOOOOOOODDK",
-        "KKDDOOOKOOOOOODKKODDK",
-        "KOOOOKKKOOOOKK.KKODDK",
-        "KKKOOOOOOOOK...KKODDK",
-        ".KDDOOLLOOODK..KKODDK",
-        ".KDDOOLLLLODK...KODDK",
-        ".KDDOOLLLLODK...KODDK",
-        "KDOOOOLLLLODK..KKODDK",
-        "KDDOOOLLLOODK..KKODDK",
-        "KDDDDKOOOOKDDOOKODDK.",
-        ".KDDKDODDKDOOOKOOODK.",
-        "..KKKKKKKKKKKKKKKKK..",
-        "....................."
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        "......KDOOODODODOODK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOOOOOOOOOOOK.",
+        "......KOOKKOOOOKKOOK.",
+        ".....KKDOKKOOOOKKODKK",
+        "......KOOOOOKKOOOOOK.",
+        ".....KKDDOOOKOOOOOODK",
+        "......KOOOOKKKOOOOK..",
+        "..KK...KDDOOOOOODK...",
+        ".KOOK..KDOOOLLOOODK..",
+        ".KDDK..KDDOOLLLLODK..",
+        "KOOK..KKDDOOLLLLODK..",
+        "KDDK.KDOOOOOLLLOODK..",
+        "KOODKKOOODOOOKOODK...",
+        "KDDDDKDDDOKDDOKODDK..",
+        ".KDDKKOOOOKOOOKOODK..",
+        "..KKKKDODDKDDOOKODK..",
+        "......KKKKKKKKKKKKK.."
     ]
 
     private static let catSleepPoseA = [
@@ -1631,20 +1760,20 @@ final class ExtraView: NSView {
         ".......KK........KK..",
         "......KOOK......KOOK.",
         "......KODOK....KODOK.",
-        "....KKKODDOKKKKODDOKK",
-        "...KDDDKDDODODODDDODK",
-        "..KDOOOKDOOODODODOODK",
-        ".KDOOOOKOOOOOOOOOOOOD",
-        "KDOOOOOOOOOOOOOOOOOOD",
-        "KDOOOOOOOOOOOOOOOOOOD",
-        "KDOOOOOODOKKOOOOKKODK",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        ".....KKDOOODODODOODK.",
+        "...KKDDOOOOOOOOOOOOK.",
+        "..KDOOODODODODODDDOK.",
+        ".KDOOOOOOOOOOOOOOOODK",
+        ".KDOOOOOODOKKOOOOKKOD",
         "KDOOOOOOOOOOOKKOOOOOD",
-        "KDDOOOOODDDOOOKOOOOOD",
+        "KDDOOOOOODDDOOOKOOOOOD",
         "KOOKKDOOOOOOKKKOOOOOD",
-        "KDDKKDOOOOOOOOOOOOODK",
-        "KOODKKDDOOLLLLLLODKOD",
-        "KDDDDKKDOODKDDODKKKK.",
-        ".KDDKDODDKDOOOKODDK..",
+        "KDDKKDOODDOOLLLLODKOD",
+        "KOODKKDDKDDOLLLLODKOD",
+        "KDDDDKKKDOOKKKKOODK..",
+        ".KDDKDODDKDDOOOKODDK.",
         "..KKKKKKKKKKKKKKKKK.."
     ]
 
@@ -1662,20 +1791,20 @@ final class ExtraView: NSView {
         ".......KK........KK..",
         "......KOOK......KOOK.",
         "......KODOK....KODOK.",
-        "....KKKODDOKKKKODDOKK",
-        "...KDDDKDDODODODDDODK",
-        "..KDOOOKDOOODODODOODK",
-        ".KDOOOOKOOOOOOOOOOOOD",
-        "KDOOOOOOOOOOOOOOOOOOD",
-        "KDOOOOOOOOOOOOOOOOOOD",
-        "KDOOOOOODOKKOOOOKKODK",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        ".....KKDOOODODODOODK.",
+        "...KKDDOOOOOOOOOOOOK.",
+        "..KDOOODODODODODDDOK.",
+        ".KDOOOOOOOOOOOOOOOODK",
+        ".KDOOOOOODOKKOOOOKKOD",
         "KDOOOOOOOOOOOKKOOOOOD",
-        "KDDOOOOODDDOOOKOOOOOD",
+        "KDDOOOOOODDDOOOKOOOOOD",
         "...KKDOOOOOOKKKOOOOOD",
-        ".KOOKDOOOOOOOOOOOOODK",
-        "KDDKKKDDOOLLLLLLODKOD",
-        "KOODKKKDOODKDDODKKKK.",
-        "KDDDDKDODDKDOOOKODDK.",
+        ".KOOKDOODDOOLLLLODKOD",
+        "KDDKKKDDKDDOLLLLODKOD",
+        "KOODKKKKDOOKKKKOODK..",
+        "KDDDDKODDKDDOOOKODDK.",
         ".KKKKKKKKKKKKKKKKKK.."
     ]
 
@@ -1693,20 +1822,20 @@ final class ExtraView: NSView {
         ".......KK........KK..",
         "......KOOK......KOOK.",
         "......KODOK....KODOK.",
-        "....KKKODDOKKKKODDOKK",
-        "...KDDDKDDODODODDDODK",
-        "..KDOOOKDOOODODODOODK",
-        ".KDOOOOKOOOOOOOOOOOOD",
-        "KDOOOOOOOOOOOOOOOOOOD",
-        "KDOOOOOOOOOOOOOOOOOOD",
-        "KDOOOOOODOKKOOOOKKODK",
+        "......KODDOKKKKODDOK.",
+        "......KODDODODODDDOK.",
+        ".....KKDOOODODODOODK.",
+        "...KKDDOOOOOOOOOOOOK.",
+        "..KDOOODODODODODDDOK.",
+        ".KDOOOOOOOOOOOOOOOODK",
+        ".KDOOOOOODOKKOOOOKKOD",
         "KDOOOOOOOOOOOKKOOOOOD",
-        "KDDOOOOODDDOOOKOOOOOD",
-        "KDDOOOOODDDOOOKOOOOOD",
-        "......KOOOOOOOOOOOODK",
-        "...KK.KDDOOLLLLLLODKD",
-        ".KOODKKDOODKDDODKKKK.",
-        "KDDDDKDODDKDOOOKODDK.",
+        "KDDOOOOOODDDOOOKOOOOOD",
+        "KDDOOOOOODDDOOOKOOOOOD",
+        "......KOODDOOLLLLODKOD",
+        "...KK.KDDKDDOLLLLODKOD",
+        ".KOODKKKDOOKKKKOODK..",
+        "KDDDDKODDKDDOOOKODDK.",
         ".KKKKKKKKKKKKKKKKKK.."
     ]
 
@@ -1983,6 +2112,49 @@ struct FanSlider: NSViewRepresentable {
     }
 }
 
+struct ClickPad: NSViewRepresentable {
+    var action: () -> Void
+    var onAttach: ((ClickView) -> Void)? = nil
+    func makeNSView(context: Context) -> ClickView {
+        let v = ClickView()
+        v.action = action
+        onAttach?(v)
+        return v
+    }
+    func updateNSView(_ v: ClickView, context: Context) {
+        v.action = action
+        onAttach?(v)
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ClickView, context: Context) -> CGSize {
+        CGSize(width: proposal.width ?? 20, height: proposal.height ?? 20)
+    }
+}
+
+final class ClickView: NSView {
+    var action: (() -> Void)?
+    override var isOpaque: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        autoresizingMask = [.width, .height]
+        if let s = superview { frame = s.bounds }
+    }
+    override func layout() {
+        super.layout()
+        if let s = superview { frame = s.bounds }
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        var r = bounds
+        if r.width < 2 || r.height < 2, let s = superview {
+            r = convert(s.bounds, from: s)
+        }
+        return r.contains(point) ? self : nil
+    }
+    override func mouseDown(with event: NSEvent) {
+        action?()
+    }
+}
+
 struct HoverPad: NSViewRepresentable {
     var tip: String? = nil
     var selected = false
@@ -2008,7 +2180,124 @@ struct HoverPad: NSViewRepresentable {
         v.syncHover()
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: HoverBG, context: Context) -> CGSize {
-        proposal.replacingUnspecifiedDimensions()
+        CGSize(width: proposal.width ?? 20, height: proposal.height ?? 20)
+    }
+}
+
+// ponytail: HoverPad click (proven in this HUD) + key monitor. NSSearchField crashed / never got first-mouse.
+struct ProcSearchField: View {
+    @ObservedObject var app = App.shared
+    var pal: Palette
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+            if app.procSearchFocused {
+                HStack(spacing: 0) {
+                    if !app.procQuery.isEmpty {
+                        Text(app.procQuery)
+                            .font(.system(size: 10))
+                            .lineLimit(1)
+                    }
+                    BlinkCaret()
+                }
+            } else if app.procQuery.isEmpty {
+                Text("Search")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary.opacity(0.55))
+            } else {
+                Text(app.procQuery)
+                    .font(.system(size: 10))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, minHeight: 18, maxHeight: 18)
+        .background(app.procSearchFocused ? pal.cardHover : pal.track, in: Capsule())
+        .overlay {
+            SearchPad()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+struct BlinkCaret: View {
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.53)) { tl in
+            let on = Int(tl.date.timeIntervalSinceReferenceDate / 0.53) % 2 == 0
+            Rectangle()
+                .fill(Color.primary.opacity(on ? 0.45 : 0))
+                .frame(width: 1, height: 10)
+        }
+    }
+}
+
+struct SearchPad: NSViewRepresentable {
+    func makeNSView(context: Context) -> SearchPadView { SearchPadView() }
+    func updateNSView(_ v: SearchPadView, context: Context) {}
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: SearchPadView, context: Context) -> CGSize {
+        CGSize(width: proposal.width ?? 80, height: proposal.height ?? 18)
+    }
+}
+
+final class SearchPadView: NSView {
+    private var hovering = false { didSet { if hovering != oldValue { needsDisplay = true } } }
+    override var isOpaque: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(point) ? self : nil }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil, !trackingAreas.contains(where: { $0.owner === self }) {
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            ))
+        }
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseDown(with event: NSEvent) {
+        App.shared.focusProcSearch(from: self)
+    }
+    override func mouseUp(with event: NSEvent) {}
+    override func draw(_ dirtyRect: NSRect) {
+        guard hovering else { return }
+        NSColor.labelColor.withAlphaComponent(0.10).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 9, yRadius: 9).fill()
+    }
+}
+
+final class ProcFieldHost: NSObject, NSTextFieldDelegate {
+    let field: NSTextField
+    override init() {
+        field = NSTextField()
+        super.init()
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .systemFont(ofSize: 10)
+        (field.cell as? NSTextFieldCell)?.isScrollable = true
+        (field.cell as? NSTextFieldCell)?.wraps = false
+        field.delegate = self
+    }
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        if let tv = field.currentEditor() as? NSTextView {
+            tv.insertionPointColor = .clear
+        }
+    }
+    func controlTextDidChange(_ obj: Notification) {
+        App.shared.procQuery = field.stringValue
+    }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            App.shared.blurProcSearch()
+            return true
+        }
+        return false
     }
 }
 
@@ -2077,7 +2366,7 @@ final class FrameProbe: NSView {
         if trackingAreas.contains(where: { $0.owner === self }) { return }
         addTrackingArea(NSTrackingArea(
             rect: .zero,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect, .assumeInside],
             owner: self,
             userInfo: nil
         ))
@@ -2592,32 +2881,51 @@ struct Dashboard: View {
                 }
             }
         case "procs":
-            Card("PROCESSES", "square.grid.2x2", pal) {
+            Card("PROCESSES", "square.grid.2x2", pal, fillHeader: true) {
                 let count = app.prefs.ramProcCount
-                let procs = Array(snap.memProcesses.prefix(count))
+                let q = app.procQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                let pool: [ProcSample] = {
+                    var list = snap.memProcesses.filter { !app.killedIds.contains($0.id) }
+                    let liveIds = Set(list.map(\.id))
+                    for g in app.vanishGhosts.values where !liveIds.contains(g.id) {
+                        list.append(g)
+                    }
+                    list.sort { $0.mem > $1.mem }
+                    return list
+                }()
+                let filtered = q.isEmpty ? pool : pool.filter { $0.name.localizedCaseInsensitiveContains(q) }
+                let procs = Array(filtered.prefix(count))
                 VStack(spacing: 4) {
                     ForEach(procs) { p in
-                        HStack(spacing: 5) {
-                            icon(p.icon)
-                            HStack(spacing: 4) {
-                                Text(p.name).font(Palette.body).lineLimit(1)
-                                if p.count > 1 {
-                                    Text("\(p.count)")
-                                        .font(.system(size: 8.5, weight: .semibold, design: .rounded))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 4)
-                                        .padding(.vertical, 0.5)
-                                        .background(pal.track, in: Capsule())
+                        ZStack {
+                            HStack(spacing: 5) {
+                                HStack(spacing: 5) {
+                                    icon(p.icon)
+                                    HStack(spacing: 4) {
+                                        Text(p.name).font(Palette.body).lineLimit(1)
+                                        if p.count > 1 {
+                                            Text("\(p.count)")
+                                                .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                                                .foregroundStyle(.secondary)
+                                                .padding(.horizontal, 4)
+                                                .padding(.vertical, 0.5)
+                                                .background(pal.track, in: Capsule())
+                                        }
+                                    }
+                                    Spacer()
+                                    AnimatingGBText(
+                                        bytes: Double(p.mem),
+                                        font: Palette.body.monospacedDigit(),
+                                        color: .secondary
+                                    )
+                                    .animation(pal.anim, value: p.mem)
                                 }
+                                .opacity(app.vanish[p.id] == nil ? 1 : 0)
+                                ProcessKillButton(process: p, app: app, pal: pal)
                             }
-                            Spacer()
-                            AnimatingGBText(
-                                bytes: Double(p.mem),
-                                font: Palette.body.monospacedDigit(),
-                                color: .secondary
-                            )
-                            .animation(pal.anim, value: p.mem)
-                            ProcessKillButton(process: p, app: app, pal: pal)
+                            if let start = app.vanish[p.id] {
+                                ThanosDust(seed: Int(p.id), start: start)
+                            }
                         }
                         .frame(height: 18)
                         .transition(.opacity)
@@ -2636,6 +2944,8 @@ struct Dashboard: View {
                     }
                 }
                 .animation(pal.snappyAnim, value: procs.map(\.id))
+            } headerTrailing: {
+                ProcSearchField(pal: pal)
             }
         default:
             EmptyView()
@@ -3085,7 +3395,8 @@ struct Dashboard: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 20)
                 .background(pal.track, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .overlay { HoverPad(tip: "Refresh: \(intervalLabel) — click to cycle", captureHits: true, onClick: { App.shared.cycleInterval() }) }
+                .overlay { HoverPad(tip: "Refresh: \(intervalLabel) — click to cycle") }
+                .overlay { ClickPad(action: { App.shared.cycleInterval() }) }
                 .accessibilityAddTraits(.isButton)
         case "theme":
             tool(themeIcon, "Theme") { App.shared.cycleTheme() }
@@ -3117,7 +3428,8 @@ struct Dashboard: View {
         .frame(maxWidth: .infinity)
         .frame(height: 20)
         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(pal.track))
-        .overlay { HoverPad(tip: tip, captureHits: true, onClick: { App.shared.openCustomApp(slot: slot) }) }
+        .overlay { HoverPad(tip: tip) }
+        .overlay { ClickPad(action: { App.shared.openCustomApp(slot: slot) }) }
         .accessibilityAddTraits(.isButton)
         .contextMenu {
             Button("Choose App…") {
@@ -3169,11 +3481,8 @@ struct Dashboard: View {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(active ? pal.accent.opacity(0.18) : pal.track)
             )
-            .overlay {
-                HoverPad(tip: tip, selected: active, captureHits: true, onClick: {
-                    app.toggleAwake()
-                })
-            }
+            .overlay { HoverPad(tip: tip, selected: active) }
+            .overlay { ClickPad(action: { app.toggleAwake() }) }
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel("Awake mode")
             .contextMenu {
@@ -3217,7 +3526,8 @@ struct Dashboard: View {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(selected ? pal.accent.opacity(0.12) : pal.track)
             )
-            .overlay { HoverPad(tip: tip, selected: selected, captureHits: true, onClick: action) }
+            .overlay { HoverPad(tip: tip, selected: selected) }
+            .overlay { ClickPad(action: action) }
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel(tip)
     }
@@ -3258,11 +3568,14 @@ struct GeoInfoRow: View {
 
 final class TrackKillView: NSView {
     var onAttach: ((NSView) -> Void)?
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window != nil {
-            onAttach?(self)
-        }
+        if window != nil { onAttach?(self) }
+    }
+    override func layout() {
+        super.layout()
+        onAttach?(self)
     }
 }
 
@@ -3276,6 +3589,39 @@ struct TrackKillRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: TrackKillView, context: Context) {
         nsView.onAttach = onAttach
     }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: TrackKillView, context: Context) -> CGSize {
+        CGSize(width: proposal.width ?? 40, height: proposal.height ?? 18)
+    }
+}
+
+struct ThanosDust: View {
+    var seed: Int
+    var start: Date
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { tl in
+            let t = min(1.0, max(0.0, tl.date.timeIntervalSince(start) / 0.85))
+            Canvas { ctx, size in
+                var s = UInt64(UInt32(bitPattern: Int32(truncatingIfNeeded: seed))) &+ 0x9E3779B97F4A7C15
+                for _ in 0..<420 {
+                    s = s &* 6364136223846793005 &+ 1
+                    let u1 = Double(s >> 33) / 2147483648.0
+                    s = s &* 6364136223846793005 &+ 1
+                    let u2 = Double(s >> 33) / 2147483648.0
+                    s = s &* 6364136223846793005 &+ 1
+                    let u3 = Double(s >> 33) / 2147483648.0
+                    let x = CGFloat(u1) * size.width
+                    let y = CGFloat(u2) * size.height
+                    let dx = CGFloat(u3 - 0.2) * size.width * CGFloat(t)
+                    let dy = CGFloat(u1 - 1.15) * 26 * CGFloat(t)
+                    let fade = 1 - t
+                    let w = 0.35 + CGFloat(u2) * 0.55
+                    let rect = CGRect(x: x + dx, y: y + dy, width: w, height: w)
+                    ctx.fill(Path(rect), with: .color(.primary.opacity(fade * (0.25 + u3 * 0.55))))
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
 }
 
 struct ProcessKillButton: View {
@@ -3287,45 +3633,56 @@ struct ProcessKillButton: View {
         app.confirmingKillPid == process.id
     }
 
+    var isVanishing: Bool { app.vanish[process.id] != nil }
+
     var body: some View {
-        Button {
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
-                if isConfirming {
-                    app.confirmingKillPid = nil
-                    app.activeKillButton = nil
-                    app.quitPids(process.pids.isEmpty ? [process.id] : process.pids)
-                } else {
-                    app.confirmingKillPid = process.id
-                }
-            }
-        } label: {
-            HStack(spacing: 3) {
-                if isConfirming {
-                    Text("Kill")
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                } else {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 13))
+        HStack(spacing: 3) {
+            if isVanishing {
+                TimelineView(.animation(minimumInterval: 0.016, paused: false)) { tl in
+                    let angle = tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 0.8) / 0.8 * 360
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(angle))
+                        .frame(width: 14, height: 14)
                 }
+            } else if isConfirming {
+                Text("Kill")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+            } else {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, isConfirming ? 7 : 0)
-            .padding(.vertical, isConfirming ? 2.5 : 0)
-            .background(
-                isConfirming ? Color.red : Color.clear,
-                in: Capsule()
-            )
-            .background(
-                TrackKillRepresentable { v in
+        }
+        .padding(.horizontal, isConfirming && !isVanishing ? 7 : 0)
+        .padding(.vertical, isConfirming && !isVanishing ? 2.5 : 0)
+        .background(isConfirming && !isVanishing ? Color.red : Color.clear, in: Capsule())
+        .background(
+            TrackKillRepresentable { v in
+                if isConfirming { app.activeKillButton = v }
+            }
+        )
+        .overlay {
+            if !isVanishing {
+                ClickPad(action: {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                        if isConfirming {
+                            app.snapKill(process)
+                        } else {
+                            app.confirmingKillPid = process.id
+                        }
+                    }
+                }, onAttach: { v in
                     if isConfirming {
                         app.activeKillButton = v
+                    } else if app.activeKillButton === v {
+                        app.activeKillButton = nil
                     }
-                }
-            )
+                })
+            }
         }
-        .buttonStyle(.plain)
-        .help(isConfirming ? "Click again to terminate \(process.name)" : "Kill \(process.name)")
     }
 }
 
@@ -3335,6 +3692,7 @@ struct Card<Content: View, HeaderTrailing: View>: View {
     let pal: Palette
     var panel: App.Panel?
     var active: Bool
+    var fillHeader = false
     let headerTrailing: HeaderTrailing?
     let content: Content
 
@@ -3344,6 +3702,7 @@ struct Card<Content: View, HeaderTrailing: View>: View {
         _ pal: Palette,
         panel: App.Panel? = nil,
         active: Bool = false,
+        fillHeader: Bool = false,
         @ViewBuilder content: () -> Content,
         @ViewBuilder headerTrailing: () -> HeaderTrailing
     ) {
@@ -3352,6 +3711,7 @@ struct Card<Content: View, HeaderTrailing: View>: View {
         self.pal = pal
         self.panel = panel
         self.active = active
+        self.fillHeader = fillHeader
         self.content = content()
         self.headerTrailing = headerTrailing()
     }
@@ -3375,16 +3735,21 @@ struct Card<Content: View, HeaderTrailing: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 6) {
                 Label(title, systemImage: symbol)
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .labelStyle(.titleAndIcon)
                     .textCase(.uppercase)
                     .tracking(0.3)
+                    .fixedSize()
                 if let headerTrailing {
-                    Spacer()
-                    headerTrailing
+                    if fillHeader {
+                        headerTrailing
+                    } else {
+                        Spacer()
+                        headerTrailing
+                    }
                 }
             }
             content
@@ -3708,7 +4073,7 @@ final class CPULoadView: NSView {
         if trackingAreas.contains(where: { $0.owner === self }) { return }
         addTrackingArea(NSTrackingArea(
             rect: .zero,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect, .assumeInside],
             owner: self,
             userInfo: nil
         ))

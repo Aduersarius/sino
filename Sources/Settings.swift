@@ -1035,7 +1035,7 @@ struct SettingsRoot: View {
                 .background(pageInfo.color, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             Text(pageInfo.title)
                 .font(.system(size: 18, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
             Spacer()
         }
     }
@@ -1676,7 +1676,7 @@ struct SettingsRoot: View {
                     .background(color, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 Text(title)
                     .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(page == id ? .white : .primary)
+                    .foregroundStyle(.primary)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
@@ -1696,7 +1696,7 @@ struct SettingsRoot: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
             SettingsGroup { content() }
         }
     }
@@ -2371,7 +2371,7 @@ struct SettingsRow<Trailing: View>: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(Chrome.text).foregroundStyle(.white)
+                Text(title).font(Chrome.text).foregroundStyle(.primary)
             }
             Spacer()
             trailing
@@ -2409,6 +2409,9 @@ private struct HoverBGView: NSViewRepresentable {
         v.needsDisplay = true
         v.syncHover()
     }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: HoverBG, context: Context) -> CGSize {
+        CGSize(width: proposal.width ?? 20, height: proposal.height ?? 20)
+    }
 }
 
 final class HoverBG: NSView {
@@ -2445,7 +2448,17 @@ final class HoverBG: NSView {
     override var isOpaque: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? {
-        (captureHits || onClick != nil) && bounds.contains(point) ? self : nil
+        guard captureHits || onClick != nil else { return nil }
+        var r = bounds
+        if r.width < 2 || r.height < 2, let s = superview {
+            r = convert(s.bounds, from: s)
+        }
+        return r.contains(point) ? self : nil
+    }
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        autoresizingMask = [.width, .height]
+        if let s = superview { frame = s.bounds }
     }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -2463,14 +2476,15 @@ final class HoverBG: NSView {
     }
     override func layout() {
         super.layout()
+        if let s = superview { frame = s.bounds }
         updateTrackingAreas()
     }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect, .assumeInside],
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
             owner: self,
             userInfo: nil
         ))

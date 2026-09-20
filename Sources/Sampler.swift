@@ -1037,6 +1037,7 @@ final class Sampler: ObservableObject {
         guard bytes > 0 else { return }
         let n = Int(bytes) / MemoryLayout<pid_t>.stride
         let now = Date()
+        let myPID = ProcessInfo.processInfo.processIdentifier
         let dt = now.timeIntervalSince(prevProcAt)
         var next: [pid_t: UInt64] = [:]
         var nextEnergy: [pid_t: UInt64] = [:]
@@ -1058,11 +1059,11 @@ final class Sampler: ObservableObject {
             let hasE = sino_pid_energy_nj(Int32(pid), &nj) == 0
             if hasE { nextEnergy[pid] = nj }
             let wantCPU = dt > 0.2 && dt < 10.0 && prevProc[pid] != nil
-            let wantMem = foot > 16 * 1024 * 1024
+            let wantMem = foot > 16 * 1024 * 1024 || pid == myPID
             let wantE = hasE && dt > 0.2 && dt < 10.0 && prevEnergy[pid] != nil
             if !wantCPU && !wantMem && !wantE { continue }
             let (name, icon) = procIdentity(pid)
-            if name == "kernel_task" || name == "Sino" { continue }
+            if name == "kernel_task" { continue }
             if wantMem {
                 byMem.append((pid, name, icon, foot))
             }
@@ -1088,10 +1089,11 @@ final class Sampler: ObservableObject {
         ).prefix(30).map { $0 }
 
         byMem.sort { $0.3 > $1.3 }
+        // ponytail: keep full RAM list so search can find Sino outside the displayed top N
         s.memProcesses = aggregateProcs(
             byMem.map { ProcSample(id: $0.0, name: $0.1, icon: $0.2, mem: $0.3, count: 1, pids: [$0.0]) },
             by: \.mem
-        ).prefix(30).map { $0 }
+        )
 
         byEnergy.sort { $0.3 > $1.3 }
         s.energyProcesses = aggregateProcs(
