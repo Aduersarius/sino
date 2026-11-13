@@ -147,6 +147,10 @@ final class Prefs: ObservableObject {
     ]
 
     @Published var interval: Double
+    @Published var foldAngle: Double
+    @Published var lowPowerOnLidClose: Bool
+    @Published var foldJitter: Double
+    @Published var foldBlur: Double
     @Published var bar: Set<String>
     @Published var barOrder: [String]
     @Published var drop: Set<String>
@@ -181,6 +185,10 @@ final class Prefs: ObservableObject {
     private init() {
         let d = UserDefaults.standard
         interval = (d.object(forKey: "sino.interval") ?? d.object(forKey: "pulse.interval")) as? Double ?? 1
+        foldAngle = d.object(forKey: "sino.foldAngle") as? Double ?? 105
+        lowPowerOnLidClose = d.object(forKey: "sino.lowPowerOnLidClose") as? Bool ?? false
+        foldJitter = d.object(forKey: "sino.foldJitter") as? Double ?? 0
+        foldBlur = d.object(forKey: "sino.foldBlur") as? Double ?? 0.35
         cpuProcMode = d.string(forKey: "sino.cpuProcMode") ?? d.string(forKey: "pulse.cpuProcMode") ?? "total"
         cpuProcCount = (d.object(forKey: "sino.cpuProcCount") ?? d.object(forKey: "pulse.cpuProcCount")) as? Int ?? 5
         ramProcCount = (d.object(forKey: "sino.ramProcCount") ?? d.object(forKey: "pulse.ramProcCount")) as? Int ?? 10
@@ -296,6 +304,10 @@ final class Prefs: ObservableObject {
     func save() {
         let d = UserDefaults.standard
         d.set(interval, forKey: "sino.interval")
+        d.set(foldAngle, forKey: "sino.foldAngle")
+        d.set(lowPowerOnLidClose, forKey: "sino.lowPowerOnLidClose")
+        d.set(foldJitter, forKey: "sino.foldJitter")
+        d.set(foldBlur, forKey: "sino.foldBlur")
         d.set(Array(bar), forKey: "sino.bar")
         d.set(barOrder, forKey: "sino.barOrder")
         d.set(Array(drop), forKey: "sino.drop")
@@ -441,6 +453,29 @@ final class Prefs: ObservableObject {
 
     var strokeNS: NSColor {
         nsColor("outline", fallback: NSColor.labelColor.withAlphaComponent(0.22))
+    }
+
+    /// Frost strength, 0 = clear, 1 = the reference's heavy glass.
+    func setFoldBlur(_ v: Double) {
+        foldBlur = min(1, max(0, v))
+        save()
+    }
+
+    /// Degrees of lid movement ignored before the fold redraws. 0 redraws on every report.
+    func setFoldJitter(_ v: Double) {
+        foldJitter = min(5, max(0, v))
+        save()
+    }
+
+    func setLowPowerOnLidClose(_ on: Bool) {
+        lowPowerOnLidClose = on
+        save()
+    }
+
+    /// Lid angle at which the fold starts. The fold begins 4° below it (FoldGate).
+    func setFoldAngle(_ v: Double) {
+        foldAngle = min(135, max(75, v))
+        save()
     }
 
     func setInterval(_ v: Double) {
@@ -763,7 +798,11 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
             rm -rf "$DEST"
             mv "$DEST.new" "$DEST"
             xattr -cr "$DEST" 2>/dev/null || true
-            codesign -s - --force --deep "$DEST" >/dev/null 2>&1 || true
+            # Keep the stable identity when it exists, so an update does not orphan the
+            # Screen Recording grant by re-signing ad-hoc.
+            SIGN="Sino Dev"
+            security find-identity -p codesigning 2>/dev/null | grep -q "Sino Dev" || SIGN="-"
+            codesign -s "$SIGN" --force --deep "$DEST" >/dev/null 2>&1 || true
             sleep 0.5
             open -n "$DEST"
             """
@@ -1245,6 +1284,23 @@ struct SettingsRoot: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                 }
+                Divider().padding(.leading, 14)
+                row("Low Power Mode when lid closes") {
+                    Toggle("", isOn: Binding(
+                        get: { prefs.lowPowerOnLidClose },
+                        set: { prefs.setLowPowerOnLidClose($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+                Divider().padding(.leading, 14)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Lid fold preview").font(Chrome.text).foregroundStyle(.primary)
+                    FoldPreviewCard()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 11)
                 Divider().padding(.leading, 14)
                 row("Right-click status bar to toggle") {
                     Toggle("", isOn: Binding(

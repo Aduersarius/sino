@@ -1,6 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+# A stable signing identity keeps TCC grants (Screen Recording) across rebuilds; an ad-hoc
+# signature hashes the binary, so every build looks like a new app and re-prompts.
+SIGN_ID="Sino Dev"
+if ! security find-identity -p codesigning -v 2>/dev/null | grep -q "\"$SIGN_ID\""; then
+  SIGN_ID="-"
+fi
 SDK="$(xcrun --show-sdk-path)"
 APP="$ROOT/dist/Sino.app"
 BIN="$APP/Contents/MacOS/Sino"
@@ -17,16 +23,17 @@ swiftc -parse-as-library -O -module-name Sino \
   -target arm64-apple-macos14.0 \
   -sdk "$SDK" \
   -import-objc-header "/tmp/sino_build/Sources/Bridging.h" \
-  -framework SwiftUI -framework AppKit -framework IOKit -framework Combine -framework ServiceManagement -framework SystemConfiguration -framework CoreWLAN -framework CoreLocation -framework UserNotifications -framework Carbon \
+  -framework SwiftUI -framework AppKit -framework IOKit -framework Combine -framework ServiceManagement -framework SystemConfiguration -framework CoreWLAN -framework CoreLocation -framework UserNotifications -framework Carbon -framework Metal -framework MetalKit -framework ScreenCaptureKit \
   -o /tmp/sino_bin \
-  "/tmp/sino_build/Sources/SMC.c" "/tmp/sino_build/Sources/Sampler.swift" "/tmp/sino_build/Sources/SinoApp.swift" "/tmp/sino_build/Sources/Settings.swift"
+  "/tmp/sino_build/Sources/SMC.c" "/tmp/sino_build/Sources/Sampler.swift" "/tmp/sino_build/Sources/SinoApp.swift" "/tmp/sino_build/Sources/Settings.swift" "/tmp/sino_build/Sources/FoldCore.swift" "/tmp/sino_build/Sources/LidSensor.swift" "/tmp/sino_build/Sources/FoldRender.swift" "/tmp/sino_build/Sources/FoldPreview.swift" "/tmp/sino_build/Sources/FoldSurface.swift" "/tmp/sino_build/Sources/DesktopCapture.swift" "/tmp/sino_build/Sources/FoldOverlay.swift" "/tmp/sino_build/Sources/LiveDesktop.swift" "/tmp/sino_build/Sources/LidFold.swift"
 mkdir -p "$APP/Contents/MacOS"
 cp /tmp/sino_bin "$BIN"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Assets/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$ROOT/Sources/Fold.metal" "$APP/Contents/Resources/Fold.metal"
 echo -n 'APPL????' > "$APP/Contents/PkgInfo"
 find "$APP" -exec xattr -c {} + 2>/dev/null || true
-codesign -s - --force --deep "$APP" >/dev/null
+codesign -s "$SIGN_ID" --force --deep "$APP" >/dev/null
 ROOTAPP="/Applications/Sino.app"
 rm -rf "$ROOT/Pulse.app" "$ROOT/dist/Pulse.app" "$ROOT/Sino.app"
 mkdir -p "$ROOTAPP/Contents/MacOS" "$ROOTAPP/Contents/Resources"
@@ -34,9 +41,10 @@ cp "$BIN" "$ROOTAPP/Contents/MacOS/Sino"
 cp /tmp/sino-smcwrite "$ROOTAPP/Contents/Resources/sino-smcwrite"
 cp "$ROOT/Info.plist" "$ROOTAPP/Contents/Info.plist"
 cp "$ROOT/Assets/AppIcon.icns" "$ROOTAPP/Contents/Resources/AppIcon.icns"
+cp "$ROOT/Sources/Fold.metal" "$ROOTAPP/Contents/Resources/Fold.metal"
 echo -n 'APPL????' > "$ROOTAPP/Contents/PkgInfo"
 find "$ROOTAPP" -exec xattr -c {} + 2>/dev/null || true
-codesign -s - --force --deep "$ROOTAPP" >/dev/null
+codesign -s "$SIGN_ID" --force --deep "$ROOTAPP" >/dev/null
 LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 "$LSREG" -u "$APP" >/dev/null 2>&1 || true
 "$LSREG" -f "$ROOTAPP" >/dev/null 2>&1 || true

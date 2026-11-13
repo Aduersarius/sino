@@ -106,6 +106,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
                 exit(0)
             }
             return
+        } else if CommandLine.arguments.contains("--fold-demo") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                LidFold.shared.preview(seconds: 8)
+            }
         } else if CommandLine.arguments.contains("--settings") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 self?.openSettings()
@@ -628,6 +632,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
                     }
                 }
             }
+            syncLidFold()
             if let duration, duration > 0 {
                 awakeRemainingSeconds = Int(duration)
                 awakeTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -641,6 +646,15 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             } else {
                 awakeRemainingSeconds = nil
             }
+        }
+    }
+
+    /// The lid fold only runs while Awake is holding the system open with the lid closed.
+    private func syncLidFold() {
+        if isAwakeActive && prefs.preventLidSleep {
+            LidFold.shared.start()
+        } else {
+            LidFold.shared.stop()
         }
     }
 
@@ -662,6 +676,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             }
         }
         isAwakeActive = false
+        syncLidFold()
     }
 
     func setPreventDisplaySleep(_ prevent: Bool) {
@@ -674,6 +689,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     func setPreventLidSleep(_ prevent: Bool) {
         prefs.setPreventLidSleep(prevent)
+        syncLidFold()
         if isAwakeActive {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let ok = PMSetHelper.setSleepDisabled(prevent)
@@ -826,6 +842,21 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled || PMSetHelper.isLowPowerMode
     }
 
+    /// Explicit setter for the lid-close rule; same guard and background call as the toggle.
+    func setLowPowerMode(_ on: Bool) {
+        guard !lpmBusy, lowPowerMode != on else { return }
+        lpmBusy = true
+        lowPowerMode = on
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ok = PMSetHelper.setLowPowerMode(on)
+            DispatchQueue.main.async {
+                self?.lpmBusy = false
+                self?.refreshLowPowerMode()
+                if !ok { self?.lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled }
+            }
+        }
+    }
+
     func toggleLowPowerMode() {
         guard !lpmBusy else { return }
         lpmBusy = true
@@ -889,14 +920,33 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         sampler.runHeavy()
         objectWillChange.send()
         host.rootView = AnyView(Dashboard(app: self, mode: .main))
+        // First open: the hosting view has just swapped from Color.clear. Force its layout before
+        // measuring, or the popover is sized from an empty tree and the toolbar row ends up below
+        // the panel edge, where it cannot be hovered.
+        host.view.needsLayout = true
+        host.view.layoutSubtreeIfNeeded()
         refreshMenu()
         sizePopover()
+        foldLog(String(format: "drop pass1 height %.1f fitting %.1f", drop.frame.height, host.view.fittingSize.height))
         drop.orderFrontRegardless()
         finishShow(clicks: true)
         DispatchQueue.main.async { [weak self] in
             guard let self, self.dropOpen else { return }
+            self.host.view.layoutSubtreeIfNeeded()
             self.sizePopover()
+            self.refreshCardFrames(self.host.view)
             self.restackChrome()
+            foldLog(String(format: "drop pass2 height %.1f fitting %.1f", self.drop.frame.height, self.host.view.fittingSize.height))
+            // The first open builds the SwiftUI tree from scratch; one more pass a frame later
+            // settles the height before the pointer can reach the bottom row.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                guard let self, self.dropOpen else { return }
+                self.host.view.layoutSubtreeIfNeeded()
+                self.sizePopover()
+                self.refreshCardFrames(self.host.view)
+                armTrack(self.drop)
+                foldLog(String(format: "drop pass3 height %.1f fitting %.1f", self.drop.frame.height, self.host.view.fittingSize.height))
+            }
         }
     }
 
