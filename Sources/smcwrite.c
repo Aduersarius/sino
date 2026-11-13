@@ -94,13 +94,14 @@ static int smc_write(const char *key, const void *buf, UInt32 sz) {
     in.data8 = kSMCReadKeyInfo;
     if (smc_call(&in, &out) != KERN_SUCCESS) return -1;
     if (out.keyInfo.dataSize != sz) return -1;
+    UInt32 dataType = out.keyInfo.dataType;
 
     memset(&in, 0, sizeof(in));
     memset(&out, 0, sizeof(out));
     in.key = fourcc(key);
     in.data8 = kSMCWriteBytes;
     in.keyInfo.dataSize = sz;
-    in.keyInfo.dataType = out.keyInfo.dataType;
+    in.keyInfo.dataType = dataType;
     memcpy(in.bytes, buf, sz > 32 ? 32 : sz);
     return smc_call(&in, &out) == KERN_SUCCESS ? 0 : -1;
 }

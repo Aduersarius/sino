@@ -62,9 +62,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     private var item: NSStatusItem!
     private var drop: NSPanel!
-    private var host: NSHostingController<Dashboard>!
+    private var host: NSHostingController<AnyView>!
     private var detail: NSPanel!
-    private var detailHost: NSHostingController<Dashboard>!
+    private var detailHost: NSHostingController<AnyView>!
+    private var detailBuilt = false
     private var extra: ExtraView!
     private var bag = Set<AnyCancellable>()
     private var hidePanel: DispatchWorkItem?
@@ -76,7 +77,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     private var hoverMon: Any?
     var settingsWC: NSWindowController?
     var onboardingWC: NSWindowController?
-    private var dropOpen = false
+    @Published var dropOpen = false
     private var ignoreClicksUntil = Date.distantPast
     private var lastDark = false
     private var appearObs: NSKeyValueObservation?
@@ -168,9 +169,9 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             return e
         }
 
-        host = NSHostingController(rootView: Dashboard(app: self, mode: .main))
+        host = NSHostingController(rootView: AnyView(Color.clear))
         drop = makeGlass(host, size: NSSize(width: 268, height: 400))
-        detailHost = NSHostingController(rootView: Dashboard(app: self, mode: .detail))
+        detailHost = NSHostingController(rootView: AnyView(Color.clear))
         detail = makeGlass(detailHost, size: NSSize(width: 268, height: 400))
         drop.orderOut(nil)
         detail.orderOut(nil)
@@ -300,9 +301,12 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     func tickCat() {
         extra.catTick += 1
-        guard let button = item?.button else { return }
-        button.effectiveAppearance.performAsCurrentDrawingAppearance {
-            button.image = extra.makeImage()
+        // Redraw only when the pose changes; the image is otherwise identical (and costly to rasterize).
+        if let button = item?.button, extra.catFrame != lastCatFrame {
+            lastCatFrame = extra.catFrame
+            button.effectiveAppearance.performAsCurrentDrawingAppearance {
+                button.image = extra.makeImage()
+            }
         }
         if dropOpen { holdHighlight() }
     }
@@ -463,6 +467,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     func showDetail() {
         guard drop.isVisible, let panel, detail != nil else { return }
+        if !detailBuilt {
+            detailBuilt = true
+            detailHost.rootView = AnyView(Dashboard(app: self, mode: .detail))
+        }
         host.view.layoutSubtreeIfNeeded()
         refreshCardFrames(host.view)
         detailHost.view.layoutSubtreeIfNeeded()
@@ -880,10 +888,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         refreshLowPowerMode()
         sampler.runHeavy()
         objectWillChange.send()
+        host.rootView = AnyView(Dashboard(app: self, mode: .main))
         refreshMenu()
         sizePopover()
         drop.orderFrontRegardless()
-        host.rootView = Dashboard(app: self, mode: .main)
         finishShow(clicks: true)
         DispatchQueue.main.async { [weak self] in
             guard let self, self.dropOpen else { return }
@@ -926,6 +934,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         drop.orderOut(nil)
         panel = nil
         dropOpen = false
+        // An alive SwiftUI tree re-renders every display cycle even while ordered out.
+        host.rootView = AnyView(Color.clear)
+        detailHost.rootView = AnyView(Color.clear)
+        detailBuilt = false
         sampler.stopHeavy()
         item.button?.isHighlighted = false
         item.button?.highlight(false)
@@ -4576,7 +4588,7 @@ struct PowerSankeyView: View {
 
     var body: some View {
         // ponytail: sine ping-pong of blend center, ends pinned → Metal if still mid
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { tl in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !App.shared.dropOpen)) { tl in
             let t = tl.date.timeIntervalSinceReferenceDate
             let e = CGFloat(0.50 + 0.22 * sin(t * Double.pi * 2.0 / 3.2))
             Canvas { ctx, size in

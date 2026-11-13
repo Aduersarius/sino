@@ -635,6 +635,7 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
     @Published var status = "—"
     @Published var updateURL: URL?
     @Published var downloadURL: URL?
+    @Published var downloadDigest: String?
     @Published var isUpdating = false
     @Published var updateProgress: String? = nil
     @Published var availableVersion: String?
@@ -661,6 +662,7 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
         if !notify {
             updateURL = nil
             downloadURL = nil
+            downloadDigest = nil
         }
         guard let url = URL(string: "https://api.github.com/repos/\(Updater.repo)/releases/latest") else { return }
         var req = URLRequest(url: url)
@@ -688,6 +690,7 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
                    let zipAsset = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".zip") == true }),
                    let dl = zipAsset["browser_download_url"] as? String {
                     self.downloadURL = URL(string: dl)
+                    self.downloadDigest = zipAsset["digest"] as? String
                 }
                 if latest.compare(self.current, options: .numeric) == .orderedDescending {
                     self.availableVersion = latest
@@ -734,21 +737,35 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
                 self.updateProgress = "Installing update…"
             }
 
+            let expected = self.downloadDigest ?? ""
             let script = """
+            set -e
             DEST="/Applications/Sino.app"
             WORK=$(mktemp -d /tmp/sino_update_XXXXXX)
             trap 'rm -rf "$WORK"' EXIT
             cp "\(tempURL.path)" "$WORK/Sino.app.zip"
+            EXPECT="\(expected)"
+            if [ -n "$EXPECT" ]; then
+                GOT=$(shasum -a 256 "$WORK/Sino.app.zip" | cut -d' ' -f1)
+                [ "sha256:$GOT" = "$EXPECT" ] || { echo "checksum mismatch: $GOT" >&2; exit 2; }
+            fi
             ditto -x -k "$WORK/Sino.app.zip" "$WORK"
             APP=$(find "$WORK" -maxdepth 2 -name 'Sino.app' | head -1)
-            if [ -n "$APP" ]; then
-                rm -rf "$DEST"
-                cp -R "$APP" "$DEST"
-                xattr -cr "$DEST" 2>/dev/null || true
-                codesign -s - --force --deep "$DEST" >/dev/null 2>&1 || true
-                sleep 0.5
-                open -n "$DEST"
-            fi
+            [ -n "$APP" ] || { echo "no app in archive" >&2; exit 3; }
+            rm -rf "$DEST.new"
+            cp -R "$APP" "$DEST.new" || { echo "copy failed" >&2; exit 4; }
+            # The running instance resets Awake and fans on terminate; stop it before the swap.
+            osascript -e 'tell application id "com.lov3u.sino" to quit' >/dev/null 2>&1 || true
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                pgrep -f 'Sino.app/Contents/MacOS/Sino' >/dev/null || break
+                sleep 0.25
+            done
+            rm -rf "$DEST"
+            mv "$DEST.new" "$DEST"
+            xattr -cr "$DEST" 2>/dev/null || true
+            codesign -s - --force --deep "$DEST" >/dev/null 2>&1 || true
+            sleep 0.5
+            open -n "$DEST"
             """
 
             DispatchQueue.global(qos: .userInitiated).async {
