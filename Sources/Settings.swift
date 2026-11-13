@@ -798,11 +798,9 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
             rm -rf "$DEST"
             mv "$DEST.new" "$DEST"
             xattr -cr "$DEST" 2>/dev/null || true
-            # Keep the stable identity when it exists, so an update does not orphan the
-            # Screen Recording grant by re-signing ad-hoc.
-            SIGN="Sino Dev"
-            security find-identity -p codesigning 2>/dev/null | grep -q "Sino Dev" || SIGN="-"
-            codesign -s "$SIGN" --force --deep "$DEST" >/dev/null 2>&1 || true
+            # No re-signing: the release carries its own signature and the digest above is the
+            # trust check. Signing again produced a new cdhash on every update, which silently
+            # dropped the user's Screen Recording grant.
             sleep 0.5
             open -n "$DEST"
             """
