@@ -106,6 +106,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
                 exit(0)
             }
             return
+        } else if CommandLine.arguments.contains("--skylight-transform") {
+            SkyLightProbe.windowTransformDemo()
         } else if CommandLine.arguments.contains("--skylight-probe") {
             SkyLightProbe.run()
             exit(0)
