@@ -7,7 +7,9 @@ import AppKit
 /// blurs the desktop, each layer above blurs what is behind it inside the window, and the number of
 /// visible layers follows the angle. The panel itself never fades — only how far the blur reaches.
 final class BlurFold {
-    private static let steps = 3
+    /// One pass: measured on this Mac, a second `.hudWindow` layer removes the rest of the detail
+    /// and collapses the ramp into a cliff. Depth comes from this layer's alpha across the gesture.
+    private static let steps = 1
 
     private var panels: [(panel: NSPanel, layers: [NSVisualEffectView], tint: NSView)] = []
     private var fadeOut: DispatchWorkItem?
@@ -94,9 +96,12 @@ final class BlurFold {
     /// visible jumps: layer i is fully on once progress passes i / steps.
     private func apply(progress: Double, layers: [NSVisualEffectView], tint: NSView) {
         let p = min(1, max(0, progress))
+        func smoothstep(_ x: Double) -> Double { x * x * (3 - 2 * x) }
         for (index, layer) in layers.enumerated() {
-            let scaled = p * Double(layers.count) - Double(index)
-            layer.alphaValue = max(0, min(1, scaled))
+            // Index 0 rides the whole range; index 1 only joins for the last 45%.
+            let start = index == 0 ? 0 : 0.55
+            let t = min(1, max(0, (p - start) / (1 - start)))
+            layer.alphaValue = smoothstep(t)
         }
         tint.layer?.opacity = Float(p * 0.4)
     }

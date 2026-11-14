@@ -473,7 +473,10 @@ final class LidFold {
                 while Date().timeIntervalSince(start) < seconds {
                     try? await Task.sleep(nanoseconds: 40_000_000)
                     let t = min(1, Date().timeIntervalSince(start) / (seconds * 0.6))
-                    blurFold.update(angle: working - 30 * t, working: working, tuning: tuning)
+                    // Sweep the whole progress range, not the first third: that is what the real
+                    // lid does between the working angle and the fade angle.
+                    let fade = tuning.validated.fadeAngle
+                    blurFold.update(angle: working - (working - fade) * t, working: working, tuning: tuning)
                 }
                 blurFold.hide(fade: 0.2)
                 foldLog("blur preview done")
