@@ -122,13 +122,7 @@ final class LidFold {
             if nilSince == nil {
                 nilSince = Date()
                 foldLog("sensor silent at \(Int(shownAngle)) deg, holding the fold")
-                let item = DispatchWorkItem { [weak self] in
-                    guard let self, self.nilSince != nil else { return }
-                    foldLog("sensor silent 10 s, dropping the fold")
-                    self.teardown()
-                }
-                nilDrop = item
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: item)
+                scheduleNilDrop(after: 10)
             }
             return
         }
@@ -283,6 +277,24 @@ final class LidFold {
         guard overlay.isShowing else { return }
         shownAngle = angle
         overlay.update(angle: angle, tuning: tuning)
+    }
+
+    /// A shut lid can keep the sensor silent for minutes, and the frozen frame is the only thing
+    /// the next open has to unfold — so silence alone must not discard it. It is only a problem
+    /// when the display is awake, because then the panel sits over a live desktop.
+    private func scheduleNilDrop(after delay: TimeInterval) {
+        nilDrop?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.nilSince != nil else { return }
+            if CGDisplayIsAsleep(CGMainDisplayID()) != 0 {
+                self.scheduleNilDrop(after: 5)
+                return
+            }
+            foldLog("sensor silent with the display awake, dropping the fold")
+            self.teardown()
+        }
+        nilDrop = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     private func reveal() {
