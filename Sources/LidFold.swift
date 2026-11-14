@@ -82,8 +82,10 @@ final class LidFold {
         drawCount = 0
         gestureStart = Date()
         foldLog("armed, fold starts at \(Int(working)) deg")
-        FoldOverlay.prewarm()
-        DesktopCapture.warm()
+        if !Prefs.shared.foldBlurOnly {
+            DesktopCapture.warm()
+            FoldOverlay.prewarm()
+        }
         if DesktopCapture.hasBuiltInDisplay, !Prefs.shared.foldBlurOnly { LiveDesktop.shared.start() }
         LidSensor.shared.onChange = { [weak self] angle in self?.receive(angle) }
         LidSensor.shared.start()

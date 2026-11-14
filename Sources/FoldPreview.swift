@@ -107,7 +107,7 @@ struct FoldPreviewCard: View {
                 Text("Blur").font(.system(size: 11))
                 Toggle("Blur the screen instead of folding it (no screen recording)", isOn: Binding(
                     get: { prefs.foldBlurOnly },
-                    set: { prefs.foldBlurOnly = $0 }))
+                    set: { prefs.setFoldBlurOnly($0) }))
                     .font(.caption)
                 Slider(value: Binding(get: { prefs.foldBlur },
                                       set: { prefs.setFoldBlur($0) }),
@@ -141,6 +141,14 @@ struct FoldPreviewCard: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
+                if prefs.foldBlurOnly {
+                    Text("Blur mode \u{2014} no Screen Recording needed")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Button("Preview") { LidFold.shared.preview() }
+                        .buttonStyle(.link)
+                        .font(.system(size: 10))
+                } else {
                 Text(!model.captureChecked
                      ? "Screen Recording not checked yet"
                      : (model.captureAllowed
@@ -162,6 +170,7 @@ struct FoldPreviewCard: View {
                     }
                     .buttonStyle(.link)
                     .font(.system(size: 10))
+                }
                 }
             }
         }
