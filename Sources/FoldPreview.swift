@@ -105,6 +105,10 @@ struct FoldPreviewCard: View {
             }
             HStack(spacing: 8) {
                 Text("Blur").font(.system(size: 11))
+                Toggle("Blur the screen instead of folding it (no screen recording)", isOn: Binding(
+                    get: { prefs.foldBlurOnly },
+                    set: { prefs.foldBlurOnly = $0 }))
+                    .font(.caption)
                 Slider(value: Binding(get: { prefs.foldBlur },
                                       set: { prefs.setFoldBlur($0) }),
                        in: 0...1, step: 0.05)

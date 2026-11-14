@@ -84,7 +84,7 @@ final class LidFold {
         foldLog("armed, fold starts at \(Int(working)) deg")
         FoldOverlay.prewarm()
         DesktopCapture.warm()
-        if DesktopCapture.hasBuiltInDisplay { LiveDesktop.shared.start() }
+        if DesktopCapture.hasBuiltInDisplay, !Prefs.shared.foldBlurOnly { LiveDesktop.shared.start() }
         LidSensor.shared.onChange = { [weak self] angle in self?.receive(angle) }
         LidSensor.shared.start()
     }
@@ -199,15 +199,20 @@ final class LidFold {
         switch state {
         case .captureRequested:
             capture()
+            if blurFold.isShowing { blurFold.update(angle: angle, working: working, tuning: tuning) }
         case .idle:
             stagedShots = nil
             staging = false
-            if overlay.isShowing { reveal() }
+            if showing { reveal() }
         case .active, .suppressed:
             break
         }
 
-        guard overlay.isShowing else { return }
+        if blurFold.isShowing, !revealing {
+            blurFold.update(angle: angle, working: working, tuning: tuning)
+        }
+
+        guard showing else { return }
 
         // A start angle above the lid's rest means the idle branch never fires; release once the
         // lid has genuinely opened and stopped.
@@ -223,6 +228,7 @@ final class LidFold {
     /// 60 Hz interpolation between sensor reports, only while the lid is moving. The timer stops
     /// once the angle has converged, so a resting lid costs nothing.
     private func startFrames() {
+        // Blur has no per-frame work: the compositor blends it and only the opacity changes.
         guard overlay.isShowing, !framesRunning else { return }
         framesRunning = true
         lastFrame = Date()
@@ -236,7 +242,7 @@ final class LidFold {
     }
 
     private func frame() {
-        guard overlay.isShowing else { stopFrames(); return }
+        guard showing else { stopFrames(); return }
         frameCount += 1
         let now = Date()
         let dt = now.timeIntervalSince(lastFrame)
@@ -253,19 +259,19 @@ final class LidFold {
             if abs(next - working) < 0.8 || now > revealDeadline {
                 revealing = false
                 shownAngle = working
-                overlay.update(angle: working, tuning: tuning)
+                apply(working)
                 stopFrames()
                 hideSoon(0.05)
             } else if abs(next - shownAngle) > 0.01 {
                 shownAngle = next
-                overlay.update(angle: next, tuning: tuning)
+                apply(next)
                 drawCount += 1
             }
             return
         }
         if abs(next - shownAngle) > 0.01 {
             shownAngle = next
-            overlay.update(angle: next, tuning: tuning)
+            apply(next)
             drawCount += 1
         }
         if abs(next - targetAngle) < 0.05, now.timeIntervalSince(lastReport) > 0.25 {
@@ -274,9 +280,19 @@ final class LidFold {
     }
 
     private func render(_ angle: Double) {
-        guard overlay.isShowing else { return }
+        guard showing else { return }
         shownAngle = angle
-        overlay.update(angle: angle, tuning: tuning)
+        apply(angle)
+    }
+
+    /// The blur mode redraws nothing between reports: the compositor owns the frost, so a new
+    /// angle is just a new opacity.
+    private func apply(_ angle: Double) {
+        if blurFold.isShowing {
+            blurFold.update(angle: angle, working: working, tuning: tuning)
+        } else {
+            overlay.update(angle: angle, tuning: tuning)
+        }
     }
 
     /// A shut lid can keep the sensor silent for minutes, and the frozen frame is the only thing
@@ -303,6 +319,13 @@ final class LidFold {
 
     private func reveal() {
         guard idleHide == nil, !revealing else { return }
+        // Blur has no frame of its own to ease back: the compositor is already showing the live
+        // desktop, so dropping it is the whole reveal.
+        if blurFold.isShowing {
+            shownAngle = working
+            hideSoon(0.04)
+            return
+        }
         if abs(shownAngle - working) < 1.0 {
             stopFrames()
             hideSoon(0.04)
@@ -327,7 +350,7 @@ final class LidFold {
     // MARK: Capture
 
     private func stage() {
-        guard DesktopCapture.hasBuiltInDisplay else { return }
+        guard !Prefs.shared.foldBlurOnly, DesktopCapture.hasBuiltInDisplay else { return }
         if NSScreen.screens.count <= 1 {
             staging = true          // the persistent stream supplies the frame; nothing to stage
             return
@@ -347,8 +370,30 @@ final class LidFold {
         }
     }
 
+    private let blurFold = BlurFold()
+    private var showing: Bool { overlay.isShowing || blurFold.isShowing }
+
     private func capture() {
         guard !capturing else { return }
+        // The blur mode never reads the screen: the compositor frosts the live desktop instead.
+        if Prefs.shared.foldBlurOnly {
+            // Mirror show(shots:): without captured/trough/gesture bookkeeping the gate stays in
+            // captureRequested and re-fires on every report, and idle tears it down again.
+            guard !blurFold.isShowing else { return }
+            revealing = false
+            idleHide?.cancel()
+            idleHide = nil
+            shownAngle = working
+            targetAngle = working
+            blurFold.show(angle: working, working: working, tuning: tuning)
+            gate.captured()
+            troughAngle = working
+            lastAngle = troughAngle
+            risingAt = .distantPast
+            gestureStart = Date()
+            foldLog("blur fold on \(NSScreen.screens.count) display(s), no capture")
+            return
+        }
         if let shots = stagedShots, Date().timeIntervalSince(stagedAt) < 0.8 {
             stagedShots = nil
             show(shots: shots, stagingMs: Date().timeIntervalSince(stagedAt) * 1000)
@@ -419,6 +464,19 @@ final class LidFold {
     func preview(seconds: Double = 6) {
         foldLog("preview requested")
         Task { @MainActor in
+            if Prefs.shared.foldBlurOnly {
+                shownAngle = working
+                blurFold.show(angle: working, working: working, tuning: tuning)
+                let start = Date()
+                while Date().timeIntervalSince(start) < seconds {
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                    let t = min(1, Date().timeIntervalSince(start) / (seconds * 0.6))
+                    blurFold.update(angle: working - 30 * t, working: working, tuning: tuning)
+                }
+                blurFold.hide(fade: 0.2)
+                foldLog("blur preview done")
+                return
+            }
             do {
                 let shots = try await DesktopCapture.snapshots()
                 guard !shots.isEmpty else { foldLog("preview found no displays"); return }
@@ -449,7 +507,7 @@ final class LidFold {
         stopFrames()
         staging = false
         idleHide?.cancel(); idleHide = nil
-        if overlay.isShowing {
+        if showing {
             let ms = Int(Date().timeIntervalSince(gestureStart) * 1000)
             foldLog(String(format: "hidden at %d deg — %d/%d frames over %d ms, %d changes, %d dup, avg Δ %.0f ms",
                            Int(shownAngle), drawCount, frameCount, ms, changeCount, dupReports, reportInterval * 1000))
@@ -458,6 +516,7 @@ final class LidFold {
             changeCount = 0
             dupReports = 0
         }
+        blurFold.hide(fade: 0.14)
         overlay.hide(fade: 0.14)
         gate.reset()
         capturing = false
