@@ -7,7 +7,7 @@ import AppKit
 /// blurs the desktop, each layer above blurs what is behind it inside the window, and the number of
 /// visible layers follows the angle. The panel itself never fades — only how far the blur reaches.
 final class BlurFold {
-    private static let steps = 6
+    private static let steps = 3
 
     private var panels: [(panel: NSPanel, layers: [NSVisualEffectView], tint: NSView)] = []
     private var fadeOut: DispatchWorkItem?
@@ -28,7 +28,9 @@ final class BlurFold {
             panel.hasShadow = false
             panel.hidesOnDeactivate = false
             panel.isReleasedWhenClosed = false
-            panel.sharingType = .none
+            // Unlike the fold, nothing here reads the screen, so the panel can stay capturable —
+            // that is what lets a screenshot show the blur it applies.
+            panel.sharingType = .readOnly
             panel.ignoresMouseEvents = true
 
             let host = NSView(frame: screen.frame)
@@ -38,7 +40,7 @@ final class BlurFold {
                 // The first layer samples the desktop; the rest sample the blur underneath them,
                 // which is what makes the stack compound instead of repeating one radius.
                 effect.blendingMode = index == 0 ? .behindWindow : .withinWindow
-                effect.material = .fullScreenUI
+                effect.material = .hudWindow
                 effect.state = .active
                 effect.autoresizingMask = [.width, .height]
                 host.addSubview(effect)
