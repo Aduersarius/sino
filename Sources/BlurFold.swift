@@ -1,108 +1,110 @@
 import AppKit
 
-/// Capture-free fold: the compositor blurs the desktop behind the panel, and the blur deepens with
-/// the hinge angle. No Screen Recording, no shader, no frozen frame.
+/// Capture-free fold: the frost sweeps down the screen as the lid closes.
 ///
-/// A single NSVisualEffectView has a fixed radius, so depth comes from a stack: the bottom layer
-/// blurs the desktop, each layer above blurs what is behind it inside the window, and the number of
-/// visible layers follows the angle. The panel itself never fades — only how far the blur reaches.
+/// Every public `NSVisualEffectView` material is already heavily blurred and its radius cannot be
+/// changed; masking a layer does not clip a behind-window backdrop either (measured: the whole
+/// screen fogged at once). Area is the only lever that works — each screen band is its own window,
+/// so the compositor blurs only the bands that have been revealed.
 final class BlurFold {
-    /// One pass: measured on this Mac, a second `.hudWindow` layer removes the rest of the detail
-    /// and collapses the ramp into a cliff. Depth comes from this layer's alpha across the gesture.
-    private static let steps = 1
+    private static let bands = 6
 
-    private var panels: [(panel: NSPanel, layers: [NSVisualEffectView], tint: NSView)] = []
+    private struct Screen {
+        let panels: [(panel: NSPanel, tint: NSView)]
+    }
+
+    private var screens: [Screen] = []
     private var fadeOut: DispatchWorkItem?
 
-    var isShowing: Bool { !panels.isEmpty }
+    var isShowing: Bool { !screens.isEmpty }
 
     func show(angle: Double, working: Double, tuning: FoldTuning) {
-        guard panels.isEmpty else { return }
+        guard screens.isEmpty else { return }
         fadeOut?.cancel(); fadeOut = nil
         for screen in NSScreen.screens {
-            let panel = NSPanel(contentRect: screen.frame,
-                                styleMask: [.borderless, .nonactivatingPanel],
-                                backing: .buffered, defer: false)
-            panel.level = .init(rawValue: NSWindow.Level.statusBar.rawValue + 1)
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-            panel.isOpaque = false
-            panel.backgroundColor = .clear
-            panel.hasShadow = false
-            panel.hidesOnDeactivate = false
-            panel.isReleasedWhenClosed = false
-            // Unlike the fold, nothing here reads the screen, so the panel can stay capturable —
-            // that is what lets a screenshot show the blur it applies.
-            panel.sharingType = .readOnly
-            panel.ignoresMouseEvents = true
+            let bandHeight = screen.frame.height / CGFloat(Self.bands)
+            var panels: [(NSPanel, NSView)] = []
+            for index in 0..<Self.bands {
+                // Index 0 is the top band: it is the one nearest the hinge.
+                let rect = NSRect(x: screen.frame.minX,
+                                  y: screen.frame.maxY - CGFloat(index + 1) * bandHeight,
+                                  width: screen.frame.width,
+                                  height: bandHeight)
+                let panel = NSPanel(contentRect: rect,
+                                    styleMask: [.borderless, .nonactivatingPanel],
+                                    backing: .buffered, defer: false)
+                panel.level = .init(rawValue: NSWindow.Level.statusBar.rawValue + 1)
+                panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+                panel.isOpaque = false
+                panel.backgroundColor = .clear
+                panel.hasShadow = false
+                panel.hidesOnDeactivate = false
+                panel.isReleasedWhenClosed = false
+                // Nothing here reads the screen, so the panels can stay capturable.
+                panel.sharingType = .readOnly
+                panel.ignoresMouseEvents = true
 
-            let host = NSView(frame: screen.frame)
-            var layers: [NSVisualEffectView] = []
-            for index in 0..<Self.steps {
-                let effect = NSVisualEffectView(frame: screen.frame)
-                // The first layer samples the desktop; the rest sample the blur underneath them,
-                // which is what makes the stack compound instead of repeating one radius.
-                effect.blendingMode = index == 0 ? .behindWindow : .withinWindow
+                let host = NSView(frame: NSRect(origin: .zero, size: rect.size))
+                let effect = NSVisualEffectView(frame: host.bounds)
                 effect.material = .hudWindow
+                effect.blendingMode = .behindWindow
+                // Sino is an accessory app and is never frontmost; without this the view renders
+                // its material without sampling the desktop.
                 effect.state = .active
                 effect.autoresizingMask = [.width, .height]
                 host.addSubview(effect)
-                layers.append(effect)
+
+                let tint = NSView(frame: host.bounds)
+                tint.wantsLayer = true
+                tint.layer?.backgroundColor = NSColor.black.cgColor
+                tint.autoresizingMask = [.width, .height]
+                host.addSubview(tint)
+
+                panel.contentView = host
+                panel.setFrame(rect, display: false)
+                panels.append((panel, tint))
             }
-
-            let tint = NSView(frame: screen.frame)
-            tint.wantsLayer = true
-            tint.layer?.backgroundColor = NSColor.black.cgColor
-            tint.autoresizingMask = [.width, .height]
-            host.addSubview(tint)
-
-            panel.contentView = host
-            panel.setFrame(screen.frame, display: false)
-            apply(progress: progress(angle: angle, tuning: tuning), layers: layers, tint: tint)
-            panel.orderFrontRegardless()
-            panels.append((panel, layers, tint))
+            screens.append(Screen(panels: panels))
         }
+        update(angle: angle, working: working, tuning: tuning)
     }
 
     func update(angle: Double, working: Double, tuning: FoldTuning) {
-        guard !panels.isEmpty else { return }
-        let p = progress(angle: angle, tuning: tuning)
-        for item in panels { apply(progress: p, layers: item.layers, tint: item.tint) }
+        guard !screens.isEmpty else { return }
+        let p = FoldMath.progress(angle: angle, tuning: tuning)
+        let eased = p * p * (3 - 2 * p)
+        // A band is revealed once the wave has passed its upper edge, plus a soft trailing band so
+        // the boundary reads as the lid moving rather than a wipe.
+        let wave = eased * Double(Self.bands + 1)
+        for screen in screens {
+            for (index, item) in screen.panels.enumerated() {
+                let revealed = wave - Double(index)
+                if revealed > 0 {
+                    if item.panel.isVisible == false { item.panel.orderFrontRegardless() }
+                    item.tint.layer?.opacity = Float(min(1, revealed / 1.5) * 0.12 * p)
+                } else if item.panel.isVisible {
+                    item.panel.orderOut(nil)
+                }
+            }
+        }
     }
 
-    /// Fades only at teardown, where the blur has already reached its deepest and the desktop is
+    /// Fades only at teardown, where the frost has already covered the screen and the desktop is
     /// live again — a hard cut there reads as a flash.
     func hide(fade: TimeInterval = 0) {
-        guard !panels.isEmpty else { return }
-        let items = panels
-        panels = []
+        guard !screens.isEmpty else { return }
+        let all = screens.flatMap(\.panels).map(\.panel)
+        screens = []
         let finish = DispatchWorkItem {
-            for item in items { item.panel.orderOut(nil) }
+            for panel in all { panel.orderOut(nil) }
         }
         fadeOut = finish
         guard fade > 0 else { finish.perform(); return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = fade
-            for item in items { item.panel.animator().alphaValue = 0 }
+            for panel in all { panel.animator().alphaValue = 0 }
         } completionHandler: {
             finish.perform()
         }
-    }
-
-    private func progress(angle: Double, tuning: FoldTuning) -> Double {
-        FoldMath.progress(angle: angle, tuning: tuning)
-    }
-
-    /// Steps are cross-faded one into the next, so the blur grows continuously rather than in six
-    /// visible jumps: layer i is fully on once progress passes i / steps.
-    private func apply(progress: Double, layers: [NSVisualEffectView], tint: NSView) {
-        let p = min(1, max(0, progress))
-        func smoothstep(_ x: Double) -> Double { x * x * (3 - 2 * x) }
-        for (index, layer) in layers.enumerated() {
-            // Index 0 rides the whole range; index 1 only joins for the last 45%.
-            let start = index == 0 ? 0 : 0.55
-            let t = min(1, max(0, (p - start) / (1 - start)))
-            layer.alphaValue = smoothstep(t)
-        }
-        tint.layer?.opacity = Float(p * 0.4)
     }
 }
