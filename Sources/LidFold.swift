@@ -321,6 +321,7 @@ final class LidFold {
 
     private func reveal() {
         guard idleHide == nil, !revealing else { return }
+        if let until = previewingUntil, Date() < until { return }
         // Blur has no frame of its own to ease back: the compositor is already showing the live
         // desktop, so dropping it is the whole reveal.
         if blurFold.isShowing {
@@ -373,6 +374,7 @@ final class LidFold {
     }
 
     private let blurFold = BlurFold()
+    private var previewingUntil: Date?
     private var showing: Bool { overlay.isShowing || blurFold.isShowing }
 
     private func capture() {
@@ -465,6 +467,7 @@ final class LidFold {
     /// Captures the desktop and plays one open→closed→open pass, without the sensor.
     func preview(seconds: Double = 6) {
         foldLog("preview requested")
+        previewingUntil = Date().addingTimeInterval(seconds + 1)
         Task { @MainActor in
             if Prefs.shared.foldBlurOnly {
                 shownAngle = working
