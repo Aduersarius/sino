@@ -286,11 +286,15 @@ final class LidFold {
         nilDrop?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.nilSince != nil else { return }
-            if CGDisplayIsAsleep(CGMainDisplayID()) != 0 {
+            // Awake holds a PreventUserIdleDisplaySleep assertion, so CGDisplayIsAsleep is 0
+            // whenever the fold is armed — the lid angle is the honest signal. A sensor that dies
+            // with the lid shut is expected and the frame must survive it; one that dies with the
+            // lid open leaves a frozen panel over a live desktop, so drop.
+            if self.lastAngle < 30 {
                 self.scheduleNilDrop(after: 5)
                 return
             }
-            foldLog("sensor silent with the display awake, dropping the fold")
+            foldLog("sensor silent with the lid open at \(Int(self.lastAngle)) deg, dropping the fold")
             self.teardown()
         }
         nilDrop = item
