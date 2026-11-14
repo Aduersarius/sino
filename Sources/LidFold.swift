@@ -136,6 +136,10 @@ final class LidFold {
             nilSince = nil
             nilDrop?.cancel(); nilDrop = nil
             foldLog("sensor back at \(Int(angle)) deg")
+            // A silent stretch leaves the gate suppressed. If the lid is already back in the
+            // open range, allow a fresh capture instead of waiting for the working angle —
+            // otherwise the next close is silently ignored.
+            if angle >= working - 4 { gate.reset() }
         }
 
         // A start angle at or above the lid's resting angle would fold the moment Awake arms.

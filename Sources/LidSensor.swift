@@ -56,7 +56,7 @@ final class LidSensor {
                 available = false
                 publish(nil)
                 stopLocked()
-                queue.asyncAfter(deadline: .now() + .seconds(2)) { [weak self] in self?.startLocked() }
+                queue.asyncAfter(deadline: .now() + .milliseconds(800)) { [weak self] in self?.startLocked() }
             }
             return
         }
