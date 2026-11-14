@@ -1,10 +1,15 @@
 import AppKit
 
-/// Capture-free fold: the compositor blurs the desktop behind the panel, and the strength follows
-/// the hinge angle. No Screen Recording, no shader, no frozen frame — the live desktop stays live,
-/// it just loses focus as the lid comes down.
+/// Capture-free fold: the compositor blurs the desktop behind the panel, and the blur deepens with
+/// the hinge angle. No Screen Recording, no shader, no frozen frame.
+///
+/// A single NSVisualEffectView has a fixed radius, so depth comes from a stack: the bottom layer
+/// blurs the desktop, each layer above blurs what is behind it inside the window, and the number of
+/// visible layers follows the angle. The panel itself never fades — only how far the blur reaches.
 final class BlurFold {
-    private var panels: [(panel: NSPanel, effect: NSVisualEffectView, tint: NSView)] = []
+    private static let steps = 6
+
+    private var panels: [(panel: NSPanel, layers: [NSVisualEffectView], tint: NSView)] = []
     private var fadeOut: DispatchWorkItem?
 
     var isShowing: Bool { !panels.isEmpty }
@@ -26,36 +31,42 @@ final class BlurFold {
             panel.sharingType = .none
             panel.ignoresMouseEvents = true
 
-            let effect = NSVisualEffectView(frame: screen.frame)
-            effect.blendingMode = .behindWindow
-            effect.material = .fullScreenUI
-            effect.state = .active
-            effect.autoresizingMask = [.width, .height]
+            let host = NSView(frame: screen.frame)
+            var layers: [NSVisualEffectView] = []
+            for index in 0..<Self.steps {
+                let effect = NSVisualEffectView(frame: screen.frame)
+                // The first layer samples the desktop; the rest sample the blur underneath them,
+                // which is what makes the stack compound instead of repeating one radius.
+                effect.blendingMode = index == 0 ? .behindWindow : .withinWindow
+                effect.material = .fullScreenUI
+                effect.state = .active
+                effect.autoresizingMask = [.width, .height]
+                host.addSubview(effect)
+                layers.append(effect)
+            }
 
             let tint = NSView(frame: screen.frame)
             tint.wantsLayer = true
             tint.layer?.backgroundColor = NSColor.black.cgColor
             tint.autoresizingMask = [.width, .height]
-
-            let host = NSView(frame: screen.frame)
-            host.addSubview(effect)
             host.addSubview(tint)
+
             panel.contentView = host
             panel.setFrame(screen.frame, display: false)
-            apply(progress: progress(angle: angle, working: working, tuning: tuning),
-                  effect: effect, tint: tint)
+            apply(progress: progress(angle: angle, tuning: tuning), layers: layers, tint: tint)
             panel.orderFrontRegardless()
-            panels.append((panel, effect, tint))
+            panels.append((panel, layers, tint))
         }
     }
 
     func update(angle: Double, working: Double, tuning: FoldTuning) {
         guard !panels.isEmpty else { return }
-        let p = progress(angle: angle, working: working, tuning: tuning)
-        for item in panels { apply(progress: p, effect: item.effect, tint: item.tint) }
+        let p = progress(angle: angle, tuning: tuning)
+        for item in panels { apply(progress: p, layers: item.layers, tint: item.tint) }
     }
 
-    /// Fades out so the panel never snaps off a blurred desktop.
+    /// Fades only at teardown, where the blur has already reached its deepest and the desktop is
+    /// live again — a hard cut there reads as a flash.
     func hide(fade: TimeInterval = 0) {
         guard !panels.isEmpty else { return }
         let items = panels
@@ -73,15 +84,18 @@ final class BlurFold {
         }
     }
 
-    private func progress(angle: Double, working: Double, tuning: FoldTuning) -> Double {
+    private func progress(angle: Double, tuning: FoldTuning) -> Double {
         FoldMath.progress(angle: angle, tuning: tuning)
     }
 
-    /// Frost arrives with the first few degrees and saturates quickly — a lid that has moved past
-    /// half its travel has already lost the desktop behind it.
-    private func apply(progress: Double, effect: NSVisualEffectView, tint: NSView) {
-        let p = min(1, max(0, progress * 1.6))
-        effect.alphaValue = p
-        tint.layer?.opacity = Float(p * 0.45)
+    /// Steps are cross-faded one into the next, so the blur grows continuously rather than in six
+    /// visible jumps: layer i is fully on once progress passes i / steps.
+    private func apply(progress: Double, layers: [NSVisualEffectView], tint: NSView) {
+        let p = min(1, max(0, progress))
+        for (index, layer) in layers.enumerated() {
+            let scaled = p * Double(layers.count) - Double(index)
+            layer.alphaValue = max(0, min(1, scaled))
+        }
+        tint.layer?.opacity = Float(p * 0.4)
     }
 }
