@@ -116,6 +116,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         } else if CommandLine.arguments.contains("--skylight-probe") {
             SkyLightProbe.run()
             exit(0)
+        } else if CommandLine.arguments.contains("--close-stop-awake") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                LidFold.shared.demoGesture(stopAwakeInClosed: true)
+            }
         } else if CommandLine.arguments.contains("--stop-awake") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 self.stopAwake()
@@ -204,7 +208,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             guard button.bounds.contains(p) else { return e }
             if e.type == .rightMouseDown {
                 if self.prefs.rightClickAwake {
-                    self.toggleAwakeWithFlash()
+                    self.toggleAwakeWithFlash(source: "right-click")
                     return nil
                 }
                 return e
@@ -580,8 +584,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         setTheme(next)
     }
 
-    func toggleAwakeWithFlash() {
-        toggleAwake()
+    func toggleAwakeWithFlash(source: String = "flash") {
+        toggleAwake(source: source)
         flashMenuBarItem(active: isAwakeActive)
     }
 
@@ -635,7 +639,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             RunLoop.main.add(flashTimer, forMode: .common)
         }
     }
-    func toggleAwake(duration: TimeInterval? = nil) {
+    func toggleAwake(duration: TimeInterval? = nil, source: String = "unknown") {
+        foldLog("toggleAwake from \(source)")
         if isAwakeActive {
             stopAwake(reason: "toggle")
         } else {
@@ -1334,7 +1339,13 @@ final class HotKeyManager {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { (_, _, _) -> OSStatus in
             DispatchQueue.main.async {
-                App.shared.toggleAwake()
+                // A hotkey cannot be pressed with the lid shut: an event that arrives then is a
+                // stale or phantom delivery, and acting on it dropped lid-sleep prevention.
+                if LidFold.shared.isLidShut {
+                    foldLog("hotkey ignored: the lid is shut")
+                    return
+                }
+                App.shared.toggleAwake(source: "carbon hotkey")
             }
             return noErr
         }, 1, &eventType, nil, &eventHandler)
@@ -3601,7 +3612,7 @@ struct Dashboard: View {
                     .fill(active ? pal.accent.opacity(0.18) : pal.track)
             )
             .overlay { HoverPad(tip: tip, selected: active) }
-            .overlay { ClickPad(action: { app.toggleAwake() }) }
+            .overlay { ClickPad(action: { app.toggleAwake(source: "menu chip") }) }
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel("Awake mode")
             .contextMenu {

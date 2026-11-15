@@ -69,6 +69,8 @@ final class LidFold {
     private init() {}
 
     var isArmed: Bool { enabled }
+    var lidAngle: Double { lastAngle }
+    var isLidShut: Bool { lastAngle > 0 && lastAngle <= tuning.validated.fadeAngle + 12 }
 
     func start() {
         guard !enabled else { return }
@@ -539,7 +541,7 @@ final class LidFold {
 
     /// Drives the real gesture path (gate, staging, capture, teardown) with a synthetic close and
     /// open, so blur mode can be tested without touching the lid.
-    func demoGesture(stopMidway: Bool = false) {
+    func demoGesture(stopMidway: Bool = false, stopAwakeInClosed: Bool = false) {
         foldLog("demo gesture requested")
         if !enabled { start() }
         // The real sensor keeps reporting while the synthetic angles run; two sources make the
@@ -556,6 +558,10 @@ final class LidFold {
                 if stopMidway, fed == down.count {
                     foldLog("demo gesture: stopping mid-fold")
                     stop()
+                }
+                if stopAwakeInClosed, fed == down.count {
+                    foldLog("demo gesture: stopping Awake with the lid shut, SleepDisabled \(PMSetHelper.isSleepDisabled)")
+                    App.shared.stopAwake(reason: "test closed-lid stop")
                 }
                 try? await Task.sleep(nanoseconds: 70_000_000)
             }
