@@ -449,6 +449,27 @@ final class LidFold {
                        shots.count, stagingMs, showMs))
     }
 
+    /// Drives the real gesture path (gate, staging, capture, teardown) with a synthetic close and
+    /// open, so blur mode can be tested without touching the lid.
+    func demoGesture() {
+        foldLog("demo gesture requested")
+        if !enabled { start() }
+        // The real sensor keeps reporting while the synthetic angles run; two sources make the
+        // gate flap idle↔captureRequested and prove nothing.
+        LidSensor.shared.onChange = nil
+        LidSensor.shared.stop()
+        Task { @MainActor in
+            let down = stride(from: working, through: working - 88, by: -3).map { $0 }
+            let up = stride(from: working - 88, through: working + 2, by: 4).map { $0 }
+            for angle in down + up {
+                receive(angle)
+                try? await Task.sleep(nanoseconds: 70_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            foldLog("demo gesture done")
+        }
+    }
+
     /// Captures the desktop and plays one open→closed→open pass, without the sensor.
     func preview(seconds: Double = 6) {
         foldLog("preview requested")

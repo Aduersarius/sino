@@ -111,6 +111,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         } else if CommandLine.arguments.contains("--skylight-probe") {
             SkyLightProbe.run()
             exit(0)
+        } else if CommandLine.arguments.contains("--fold-close") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                LidFold.shared.demoGesture()
+            }
         } else if CommandLine.arguments.contains("--fold-demo") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 LidFold.shared.preview(seconds: 8)
