@@ -116,6 +116,14 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         } else if CommandLine.arguments.contains("--skylight-probe") {
             SkyLightProbe.run()
             exit(0)
+        } else if CommandLine.arguments.contains("--stop-awake") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                self.stopAwake()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    foldLog("stop-awake done, SleepDisabled \(PMSetHelper.isSleepDisabled)")
+                    exit(0)
+                }
+            }
         } else if CommandLine.arguments.contains("--blur-churn") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 LidFold.shared.demoChurn()
@@ -161,7 +169,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         mainMenu.addItem(appItem)
         NSApp.mainMenu = mainMenu
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.stopAwake(resetPMSet: true, sync: true, keepPersisted: true)
+            self?.stopAwake(resetPMSet: true, sync: true, keepPersisted: true, reason: "terminate")
             self?.releaseFans()
         }
         // Awake survives a relaunch: clearing `disablesleep` unconditionally here meant any
@@ -629,7 +637,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     }
     func toggleAwake(duration: TimeInterval? = nil) {
         if isAwakeActive {
-            stopAwake()
+            stopAwake(reason: "toggle")
         } else {
             startAwake(duration: duration)
         }
@@ -683,7 +691,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
                     if let rem = self.awakeRemainingSeconds, rem > 1 {
                         self.awakeRemainingSeconds = rem - 1
                     } else {
-                        self.stopAwake()
+                        self.stopAwake(reason: "duration expired")
                     }
                 }
             } else {
@@ -704,7 +712,9 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
-    func stopAwake(resetPMSet: Bool = true, sync: Bool = false, keepPersisted: Bool = false) {
+    func stopAwake(resetPMSet: Bool = true, sync: Bool = false, keepPersisted: Bool = false,
+                   reason: String = "explicit") {
+        foldLog("stopAwake: \(reason), resetPMSet \(resetPMSet), keepPersisted \(keepPersisted)")
         if !keepPersisted { prefs.setAwakeActive(false) }
         awakeTimer?.invalidate()
         awakeTimer = nil
