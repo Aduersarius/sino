@@ -472,10 +472,12 @@ final class Prefs: ObservableObject {
         guard v != foldMode, ["fold", "blur", "off"].contains(v) else { return }
         foldMode = v
         save()
-        if v == "off" {
-            LidFold.shared.stop()
-        } else if App.shared.isAwakeActive, preventLidSleep {
+        // Off stops the animation, not the lid monitoring that screen-off and Low Power use.
+        if App.shared.isAwakeActive, preventLidSleep {
             LidFold.shared.start()
+        }
+        if v == "off" {
+            LidFold.shared.stopAnimations()
         }
     }
 

@@ -673,7 +673,9 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     /// The lid fold only runs while Awake is holding the system open with the lid closed.
     private func syncLidFold() {
-        if isAwakeActive && prefs.preventLidSleep && prefs.foldMode != "off" {
+        // The sensor also drives screen-off and Low Power Mode, so it stays armed with the
+        // animation set to Off.
+        if isAwakeActive && prefs.preventLidSleep {
             LidFold.shared.start()
         } else {
             LidFold.shared.stop()

@@ -71,7 +71,7 @@ final class LidFold {
     var isArmed: Bool { enabled }
 
     func start() {
-        guard !enabled, Prefs.shared.foldMode != "off" else { return }
+        guard !enabled else { return }
         enabled = true
         armedSeenOpen = false
         loggedWaiting = false
@@ -83,13 +83,21 @@ final class LidFold {
         drawCount = 0
         gestureStart = Date()
         foldLog("armed, fold starts at \(Int(working)) deg")
-        if !Prefs.shared.foldBlurOnly {
+        // Only the fold needs frames; blur asks the compositor and Off shows nothing.
+        if Prefs.shared.foldMode == "fold" {
             DesktopCapture.warm()
             FoldOverlay.prewarm()
+            if DesktopCapture.hasBuiltInDisplay { LiveDesktop.shared.start() }
         }
-        if DesktopCapture.hasBuiltInDisplay, !Prefs.shared.foldBlurOnly { LiveDesktop.shared.start() }
         LidSensor.shared.onChange = { [weak self] angle in self?.receive(angle) }
         LidSensor.shared.start()
+    }
+
+    /// Drops any animation surface but keeps the sensor running.
+    func stopAnimations() {
+        blurFold.hide()
+        overlay.hide()
+        LiveDesktop.shared.stop()
     }
 
     func stop() {
@@ -181,7 +189,7 @@ final class LidFold {
         if angle < troughAngle { troughAngle = angle }
 
         if Prefs.shared.sleepDisplayOnLidClose {
-            let closed = angle <= working - 4
+            let closed = isClosed(angle)
             if closed != displaySleepApplied {
                 displaySleepApplied = closed
                 if closed { sleepBuiltInDisplay() }
@@ -189,7 +197,7 @@ final class LidFold {
         }
 
         if Prefs.shared.lowPowerOnLidClose {
-            let closed = angle <= working - 4
+            let closed = isClosed(angle)
             if closed != lowPowerApplied {
                 lowPowerApplied = closed
                 foldLog(closed ? "lid closed: Low Power Mode on" : "lid open: Low Power Mode off")
@@ -309,6 +317,12 @@ final class LidFold {
         }
     }
 
+    /// Physical closure, not the first few degrees of travel: at 110 deg open, `working - 4` is a
+    /// lid that has barely moved, and acting there killed the animation it was meant to follow.
+    private func isClosed(_ angle: Double) -> Bool {
+        angle <= tuning.validated.fadeAngle + 12
+    }
+
     /// The lid covers the built-in panel, so leaving it lit wastes power for nothing. Only done
     /// when it is the sole display: with an external one attached, sleeping "the displays" would
     /// black out the screen the user is actually looking at.
@@ -408,6 +422,10 @@ final class LidFold {
 
     private func capture() {
         guard !capturing else { return }
+        guard Prefs.shared.foldMode != "off" else {
+            gate.fail()
+            return
+        }
         // Blur mode never reads the screen: the window server blurs whatever is behind the panel.
         if Prefs.shared.foldBlurOnly {
             if blurFold.isShowing { return }
