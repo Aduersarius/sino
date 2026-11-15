@@ -144,14 +144,6 @@ struct FoldPreviewCard: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
-                if prefs.foldBlurOnly {
-                    Text("Blur mode \u{2014} no Screen Recording needed")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                    Button("Preview") { LidFold.shared.preview() }
-                        .buttonStyle(.link)
-                        .font(.system(size: 10))
-                } else {
                 Text(!model.captureChecked
                      ? "Screen Recording not checked yet"
                      : (model.captureAllowed
@@ -173,7 +165,6 @@ struct FoldPreviewCard: View {
                     }
                     .buttonStyle(.link)
                     .font(.system(size: 10))
-                }
                 }
             }
         }

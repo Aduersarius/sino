@@ -458,15 +458,13 @@ final class Prefs: ObservableObject {
         nsColor("outline", fallback: NSColor.labelColor.withAlphaComponent(0.22))
     }
 
-    /// Blur-only mode reads no pixels, so the live stream must follow the toggle instead of
-    /// staying armed from whenever the feature was switched on.
+    /// Both modes read the screen — the fold warps the frame, blur mode filters it — so the
+    /// stream only has to be up whenever the feature is armed.
     func setFoldBlurOnly(_ v: Bool) {
         guard v != foldBlurOnly else { return }
         foldBlurOnly = v
         save()
-        if v {
-            LiveDesktop.shared.stop()
-        } else if LidFold.shared.isArmed, DesktopCapture.hasBuiltInDisplay {
+        if LidFold.shared.isArmed, DesktopCapture.hasBuiltInDisplay {
             LiveDesktop.shared.start()
         }
     }
