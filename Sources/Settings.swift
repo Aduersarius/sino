@@ -152,6 +152,8 @@ final class Prefs: ObservableObject {
     @Published var sleepDisplayOnLidClose: Bool
     /// Whether Awake was holding the system open when the app last ran.
     @Published var awakeActive: Bool
+    /// Absolute end of a timed Awake session, 0 when it was indefinite.
+    @Published var awakeUntil: Double
     @Published var foldJitter: Double
     @Published var foldBlur: Double
     @Published var foldBlurStrength: Double
@@ -195,6 +197,7 @@ final class Prefs: ObservableObject {
         lowPowerOnLidClose = d.object(forKey: "sino.lowPowerOnLidClose") as? Bool ?? false
         sleepDisplayOnLidClose = d.object(forKey: "sino.sleepDisplayOnLidClose") as? Bool ?? false
         awakeActive = d.object(forKey: "sino.awakeActive") as? Bool ?? false
+        awakeUntil = d.object(forKey: "sino.awakeUntil") as? Double ?? 0
         foldJitter = d.object(forKey: "sino.foldJitter") as? Double ?? 0
         foldBlur = d.object(forKey: "sino.foldBlur") as? Double ?? 0.35
         foldBlurStrength = d.object(forKey: "sino.foldBlurStrength") as? Double ?? 0.55
@@ -319,6 +322,7 @@ final class Prefs: ObservableObject {
         d.set(lowPowerOnLidClose, forKey: "sino.lowPowerOnLidClose")
         d.set(sleepDisplayOnLidClose, forKey: "sino.sleepDisplayOnLidClose")
         d.set(awakeActive, forKey: "sino.awakeActive")
+        d.set(awakeUntil, forKey: "sino.awakeUntil")
         d.set(foldJitter, forKey: "sino.foldJitter")
         d.set(foldBlur, forKey: "sino.foldBlur")
         d.set(foldBlurStrength, forKey: "sino.foldBlurStrength")
@@ -506,6 +510,12 @@ final class Prefs: ObservableObject {
     func setAwakeActive(_ on: Bool) {
         guard on != awakeActive else { return }
         awakeActive = on
+        if !on { awakeUntil = 0 }
+        save()
+    }
+
+    func setAwakeUntil(_ when: Double) {
+        awakeUntil = when
         save()
     }
 

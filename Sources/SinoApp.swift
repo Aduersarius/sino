@@ -167,8 +167,16 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         // Awake survives a relaunch: clearing `disablesleep` unconditionally here meant any
         // restart (or crash relaunch) silently turned clamshell prevention off.
         if prefs.awakeActive {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.startAwake()
+            // A timed session must not come back as indefinite: resume only what is left of it,
+            // and let an expired one die quietly.
+            let remaining = prefs.awakeUntil > 0 ? prefs.awakeUntil - Date().timeIntervalSince1970 : nil
+            if let remaining, remaining <= 0 {
+                prefs.setAwakeActive(false)
+                handleLeftoverSleepDisabled()
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.startAwake(duration: remaining)
+                }
             }
         } else if PMSetHelper.isSleepDisabled {
             DispatchQueue.global(qos: .utility).async {
@@ -637,6 +645,11 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         set { setPreventLidSleep(newValue) }
     }
 
+    private func handleLeftoverSleepDisabled() {
+        guard PMSetHelper.isSleepDisabled else { return }
+        DispatchQueue.global(qos: .utility).async { PMSetHelper.setSleepDisabled(false) }
+    }
+
     func startAwake(duration: TimeInterval? = nil) {
         stopAwake(resetPMSet: false)
         let type = prefs.preventDisplaySleep ? kIOPMAssertionTypePreventUserIdleDisplaySleep : kIOPMAssertionTypePreventUserIdleSystemSleep
@@ -651,6 +664,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             awakeAssertionID = id
             isAwakeActive = true
             prefs.setAwakeActive(true)
+            prefs.setAwakeUntil(duration.map { Date().timeIntervalSince1970 + $0 } ?? 0)
             if prefs.preventLidSleep {
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     let ok = PMSetHelper.setSleepDisabled(true)
