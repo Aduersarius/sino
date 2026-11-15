@@ -95,8 +95,9 @@ final class BlurFold {
         let p = min(1, max(0, progress))
         // Measured radius→sharpness on this Mac: 0 -> 3.9, 0.5 -> 1.8, 1 -> 1.2, 2 -> 0.6, 4 -> 0.4.
         // Detail dies in the first point or two, so the ramp has to live there: a quadratic that
-        // spends most of the gesture under 1 pt. Strength sets the cap, 1.5 to 6 pt.
-        let cap = 1.5 + 4.5 * min(1, max(0, strength))
+        // spends most of the gesture under 1 pt. Strength sets the cap, 2 to 60 pt: at 1.0 the
+        // screen has to be unreadable, and 20 pt still left shapes legible.
+        let cap = 2 + 58 * min(1, max(0, strength))
         return cap * p * p
     }
 }
