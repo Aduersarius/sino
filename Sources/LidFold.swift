@@ -539,6 +539,17 @@ final class LidFold {
         }
     }
 
+    /// Feeds one closed angle and one open angle, so the screen-off branch can be exercised
+    /// without a physical lid.
+    func demoClosedPulse() {
+        if !enabled { start() }
+        LidSensor.shared.onChange = nil
+        LidSensor.shared.stop()
+        foldLog("closed pulse: feeding 20 deg, SleepDisabled \(PMSetHelper.isSleepDisabled)")
+        receive(20)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.receive(100) }
+    }
+
     /// Drives the real gesture path (gate, staging, capture, teardown) with a synthetic close and
     /// open, so blur mode can be tested without touching the lid.
     func demoGesture(stopMidway: Bool = false, stopAwakeInClosed: Bool = false) {

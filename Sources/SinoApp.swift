@@ -116,6 +116,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         } else if CommandLine.arguments.contains("--skylight-probe") {
             SkyLightProbe.run()
             exit(0)
+        } else if CommandLine.arguments.contains("--closed-pulse") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                LidFold.shared.demoClosedPulse()
+            }
         } else if CommandLine.arguments.contains("--close-stop-awake") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 LidFold.shared.demoGesture(stopAwakeInClosed: true)
