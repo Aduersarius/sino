@@ -115,6 +115,19 @@ struct FoldPreviewCard: View {
                 .frame(width: 180)
                 Spacer()
             }
+            if prefs.foldMode == "blur" {
+                HStack(spacing: 8) {
+                    Text("Strength").font(.system(size: 11))
+                    Slider(value: Binding(get: { prefs.foldBlurStrength },
+                                          set: { prefs.setFoldBlurStrength($0) }),
+                           in: 0...1, step: 0.05)
+                        .frame(width: 130)
+                    Text(String(format: "%.2f", prefs.foldBlurStrength))
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
             if prefs.foldMode == "fold" {
                 HStack(spacing: 8) {
                     Text("Frost").font(.system(size: 11))

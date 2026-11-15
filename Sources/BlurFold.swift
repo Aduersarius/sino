@@ -58,7 +58,7 @@ final class BlurFold {
     func update(angle: Double, tuning: FoldTuning) {
         guard !panels.isEmpty else { return }
         let progress = FoldMath.progress(angle: angle, tuning: tuning)
-        let radius = Self.radius(for: progress)
+        let radius = Self.radius(for: progress, strength: Prefs.shared.foldBlurStrength)
         for item in panels {
             // CALayer copies whatever filter it is given, so mutating a stored instance changes
             // nothing on screen — each update has to install a fresh filter.
@@ -91,11 +91,12 @@ final class BlurFold {
 
     /// Measured on this Mac, sharpness stops falling past roughly 10-12 pt: a 22 pt cap spent the
     /// second half of the gesture on a radius nobody can see.
-    static func radius(for progress: Double) -> Double {
+    static func radius(for progress: Double, strength: Double) -> Double {
         let p = min(1, max(0, progress))
         // Measured radius→sharpness on this Mac: 0 -> 3.9, 0.5 -> 1.8, 1 -> 1.2, 2 -> 0.6, 4 -> 0.4.
         // Detail dies in the first point or two, so the ramp has to live there: a quadratic that
-        // spends most of the gesture under 1 pt, and reaches 3 pt when the lid is shut.
-        return 3 * p * p
+        // spends most of the gesture under 1 pt. Strength sets the cap, 1.5 to 6 pt.
+        let cap = 1.5 + 4.5 * min(1, max(0, strength))
+        return cap * p * p
     }
 }

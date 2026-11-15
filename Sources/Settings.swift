@@ -151,6 +151,7 @@ final class Prefs: ObservableObject {
     @Published var lowPowerOnLidClose: Bool
     @Published var foldJitter: Double
     @Published var foldBlur: Double
+    @Published var foldBlurStrength: Double
     @Published var foldMode: String
     var foldBlurOnly: Bool { foldMode == "blur" }
     @Published var bar: Set<String>
@@ -191,6 +192,7 @@ final class Prefs: ObservableObject {
         lowPowerOnLidClose = d.object(forKey: "sino.lowPowerOnLidClose") as? Bool ?? false
         foldJitter = d.object(forKey: "sino.foldJitter") as? Double ?? 0
         foldBlur = d.object(forKey: "sino.foldBlur") as? Double ?? 0.35
+        foldBlurStrength = d.object(forKey: "sino.foldBlurStrength") as? Double ?? 0.55
         foldMode = d.string(forKey: "sino.foldMode")
             ?? ((d.object(forKey: "sino.foldBlurOnly") as? Bool ?? false) ? "blur" : "fold")
         cpuProcMode = d.string(forKey: "sino.cpuProcMode") ?? d.string(forKey: "pulse.cpuProcMode") ?? "total"
@@ -312,6 +314,7 @@ final class Prefs: ObservableObject {
         d.set(lowPowerOnLidClose, forKey: "sino.lowPowerOnLidClose")
         d.set(foldJitter, forKey: "sino.foldJitter")
         d.set(foldBlur, forKey: "sino.foldBlur")
+        d.set(foldBlurStrength, forKey: "sino.foldBlurStrength")
         d.set(foldMode, forKey: "sino.foldMode")
         d.set(Array(bar), forKey: "sino.bar")
         d.set(barOrder, forKey: "sino.barOrder")
@@ -471,6 +474,12 @@ final class Prefs: ObservableObject {
         } else if App.shared.isAwakeActive, preventLidSleep {
             LidFold.shared.start()
         }
+    }
+
+    /// How far the blur mode softens the screen at full closure.
+    func setFoldBlurStrength(_ v: Double) {
+        foldBlurStrength = min(1, max(0, v))
+        save()
     }
 
     /// Frost strength, 0 = clear, 1 = the reference's heavy glass.
