@@ -102,6 +102,9 @@ final class LidFold {
         cancelTimers()
         LidSensor.shared.onChange = nil
         LidSensor.shared.stop()
+        // Both surfaces: blur mode has its own panels, and stopping with one on screen left the
+        // desktop frosted until the app was quit.
+        blurFold.hide()
         overlay.hide()
     }
 
@@ -470,7 +473,7 @@ final class LidFold {
 
     /// Drives the real gesture path (gate, staging, capture, teardown) with a synthetic close and
     /// open, so blur mode can be tested without touching the lid.
-    func demoGesture() {
+    func demoGesture(stopMidway: Bool = false) {
         foldLog("demo gesture requested")
         if !enabled { start() }
         // The real sensor keeps reporting while the synthetic angles run; two sources make the
@@ -480,8 +483,14 @@ final class LidFold {
         Task { @MainActor in
             let down = stride(from: working, through: working - 88, by: -3).map { $0 }
             let up = stride(from: working - 88, through: working + 2, by: 4).map { $0 }
+            var fed = 0
             for angle in down + up {
                 receive(angle)
+                fed += 1
+                if stopMidway, fed == down.count {
+                    foldLog("demo gesture: stopping mid-fold")
+                    stop()
+                }
                 try? await Task.sleep(nanoseconds: 70_000_000)
             }
             try? await Task.sleep(nanoseconds: 700_000_000)
