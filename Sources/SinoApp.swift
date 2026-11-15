@@ -207,6 +207,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             let p = button.convert(e.locationInWindow, from: nil)
             guard button.bounds.contains(p) else { return e }
             if e.type == .rightMouseDown {
+                foldLog("status item right-click delivered")
                 if self.prefs.rightClickAwake {
                     self.toggleAwakeWithFlash(source: "right-click")
                     return nil
@@ -1339,12 +1340,7 @@ final class HotKeyManager {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { (_, _, _) -> OSStatus in
             DispatchQueue.main.async {
-                // A hotkey cannot be pressed with the lid shut: an event that arrives then is a
-                // stale or phantom delivery, and acting on it dropped lid-sleep prevention.
-                if LidFold.shared.isLidShut {
-                    foldLog("hotkey ignored: the lid is shut")
-                    return
-                }
+                foldLog("hotkey event delivered")
                 App.shared.toggleAwake(source: "carbon hotkey")
             }
             return noErr
