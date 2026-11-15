@@ -181,7 +181,12 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         // "Prevent lid-close sleep" is a setting: it holds while Sino runs, whether or not an Awake
         // session is active. Clearing `disablesleep` on every launch is what made the lid sleep.
         if prefs.preventLidSleep {
-            PMSetHelper.setSleepDisabled(true)
+            PMSetHelper.setSleepDisabled(true) { [weak self] ok in
+                guard !ok else { return }
+                // Without the rule the lid will sleep the Mac; show the setting as it really is.
+                foldLog("launch: could not apply lid-sleep prevention, switching the setting off")
+                self?.prefs.setPreventLidSleep(false)
+            }
         } else if PMSetHelper.isSleepDisabled {
             PMSetHelper.setSleepDisabled(false)
         }
@@ -4940,6 +4945,8 @@ enum PMSetHelper {
 
     @discardableResult
     private static func setPmset(_ key: String, _ on: Bool) -> Bool {
+        // Test hook: exercises the failure paths without revoking the sudoers rule.
+        if ProcessInfo.processInfo.environment["SINO_PMSET_FAIL"] == "1" { return false }
         let val = on ? "1" : "0"
         let sudoProc = Process()
         sudoProc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
