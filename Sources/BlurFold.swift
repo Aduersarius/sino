@@ -13,6 +13,9 @@ final class BlurFold {
     private var panels: [NSPanel] = []
     private var fadeOut: DispatchWorkItem?
     private var fadeTimer: Timer?
+    /// Panels left over from a fade that has not finished. They are still on screen, so anything
+    /// that shows again must retire them first instead of abandoning them.
+    private var fading: [NSPanel] = []
     private var lastRadius: Double = 0
 
     var isShowing: Bool { !panels.isEmpty }
@@ -60,19 +63,34 @@ final class BlurFold {
         for panel in panels { SkyLightBlur.setRadius(Int32(panel.windowNumber), radius) }
     }
 
+    /// Retires panels whose fade was interrupted: they belong to a timer that is about to be
+    /// cancelled, and without this they stay on screen forever.
+    private func finishFade() {
+        fadeTimer?.invalidate(); fadeTimer = nil
+        fadeOut?.cancel(); fadeOut = nil
+        for panel in fading {
+            SkyLightBlur.setRadius(Int32(panel.windowNumber), 0)
+            panel.orderOut(nil)
+        }
+        if !fading.isEmpty { foldLog("blur fade interrupted, retired \(fading.count) panel(s)") }
+        fading = []
+    }
+
     /// Ramps the radius down over `fade` instead of cutting it. The panels themselves must stay
     /// opaque meanwhile: fading their 1% white fill animates nothing at all.
     func hide(fade: TimeInterval = 0) {
+        finishFade()
         guard !panels.isEmpty else { return }
-        fadeTimer?.invalidate()
         let items = panels
         let start = lastRadius
         panels = []
-        let finish = DispatchWorkItem {
+        fading = items
+        let finish = DispatchWorkItem { [weak self] in
             for panel in items {
                 SkyLightBlur.setRadius(Int32(panel.windowNumber), 0)
                 panel.orderOut(nil)
             }
+            self?.fading.removeAll { fading in items.contains { $0 === fading } }
             foldLog("blur hidden")
         }
         fadeOut = finish

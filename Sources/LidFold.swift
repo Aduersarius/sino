@@ -475,6 +475,24 @@ final class LidFold {
                        shots.count, stagingMs, showMs))
     }
 
+    /// Show, hide mid-fade, show again, hide: the sequence that used to leave the first panel
+    /// stranded once its timer was cancelled.
+    func demoChurn() {
+        foldLog("blur churn start")
+        _ = blurFold.show(angle: working, working: working, tuning: tuning)
+        blurFold.update(angle: working - 60, working: working, tuning: tuning)
+        blurFold.hide(fade: 0.4)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self else { return }
+            _ = self.blurFold.show(angle: self.working, working: self.working, tuning: self.tuning)
+            self.blurFold.update(angle: self.working - 30, working: self.working, tuning: self.tuning)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self.blurFold.hide(fade: 0.4)
+                foldLog("blur churn done")
+            }
+        }
+    }
+
     /// Drives the real gesture path (gate, staging, capture, teardown) with a synthetic close and
     /// open, so blur mode can be tested without touching the lid.
     func demoGesture(stopMidway: Bool = false) {

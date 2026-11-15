@@ -116,6 +116,10 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         } else if CommandLine.arguments.contains("--skylight-probe") {
             SkyLightProbe.run()
             exit(0)
+        } else if CommandLine.arguments.contains("--blur-churn") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                LidFold.shared.demoChurn()
+            }
         } else if CommandLine.arguments.contains("--fold-stop-mid") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 LidFold.shared.demoGesture(stopMidway: true)
