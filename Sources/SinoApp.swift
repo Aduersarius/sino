@@ -161,10 +161,16 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         mainMenu.addItem(appItem)
         NSApp.mainMenu = mainMenu
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.stopAwake(resetPMSet: true, sync: true)
+            self?.stopAwake(resetPMSet: true, sync: true, keepPersisted: true)
             self?.releaseFans()
         }
-        if PMSetHelper.isSleepDisabled {
+        // Awake survives a relaunch: clearing `disablesleep` unconditionally here meant any
+        // restart (or crash relaunch) silently turned clamshell prevention off.
+        if prefs.awakeActive {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.startAwake()
+            }
+        } else if PMSetHelper.isSleepDisabled {
             DispatchQueue.global(qos: .utility).async {
                 PMSetHelper.setSleepDisabled(false)
             }
@@ -644,6 +650,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         if ret == kIOReturnSuccess {
             awakeAssertionID = id
             isAwakeActive = true
+            prefs.setAwakeActive(true)
             if prefs.preventLidSleep {
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     let ok = PMSetHelper.setSleepDisabled(true)
@@ -682,7 +689,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
-    func stopAwake(resetPMSet: Bool = true, sync: Bool = false) {
+    func stopAwake(resetPMSet: Bool = true, sync: Bool = false, keepPersisted: Bool = false) {
+        if !keepPersisted { prefs.setAwakeActive(false) }
         awakeTimer?.invalidate()
         awakeTimer = nil
         awakeRemainingSeconds = nil
