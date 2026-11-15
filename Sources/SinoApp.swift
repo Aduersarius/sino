@@ -116,6 +116,22 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         } else if CommandLine.arguments.contains("--skylight-probe") {
             SkyLightProbe.run()
             exit(0)
+        } else if CommandLine.arguments.contains("--right-click-demo") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                LidFold.shared.demoClosedPulse()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    foldLog("demo: right-click with the lid shut")
+                    _ = self.handleAwakeRightClick()
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    foldLog("demo: right-click with the lid open")
+                    LidFold.shared.receiveForDemo(100)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        _ = self.handleAwakeRightClick()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
+                    }
+                }
+            }
         } else if CommandLine.arguments.contains("--closed-pulse") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 LidFold.shared.demoClosedPulse()
@@ -214,11 +230,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             guard button.bounds.contains(p) else { return e }
             if e.type == .rightMouseDown {
                 foldLog("status item right-click delivered")
-                if self.prefs.rightClickAwake {
-                    self.toggleAwakeWithFlash(source: "right-click")
-                    return nil
-                }
-                return e
+                return self.handleAwakeRightClick() ? nil : e
             }
             if e.type == .leftMouseDown {
                 self.toggle()
@@ -589,6 +601,20 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func cycleTheme() {
         let next = ["system", "light", "dark"].drop(while: { $0 != theme }).dropFirst().first ?? "system"
         setTheme(next)
+    }
+
+    /// Returns true when the click was consumed. A right-click that arrives with the lid shut is
+    /// hardware noise: the menu bar is not reachable through a closed panel, and acting on it
+    /// ended the Awake session and cleared lid-sleep prevention.
+    @discardableResult
+    func handleAwakeRightClick() -> Bool {
+        if LidFold.shared.isLidShut {
+            foldLog("right-click ignored: the lid is shut")
+            return true
+        }
+        guard prefs.rightClickAwake else { return false }
+        toggleAwakeWithFlash(source: "right-click")
+        return true
     }
 
     func toggleAwakeWithFlash(source: String = "flash") {

@@ -70,7 +70,10 @@ final class LidFold {
 
     var isArmed: Bool { enabled }
     var lidAngle: Double { lastAngle }
-    var isLidShut: Bool { lastAngle > 0 && lastAngle <= tuning.validated.fadeAngle + 12 }
+    /// Held across sensor silence: at closure the sensor stops reporting, so the last real angle
+    /// is the only evidence the lid is shut, and the animation angle is not it.
+    private var lidClosed = false
+    var isLidShut: Bool { lidClosed }
 
     func start() {
         guard !enabled else { return }
@@ -108,6 +111,9 @@ final class LidFold {
             App.shared.setLowPowerMode(false)
         }
         enabled = false
+        // Without this the cache outlives the sensor: a stop taken with the lid shut would leave
+        // `lidClosed` true forever and block right-click from re-enabling Awake.
+        lidClosed = false
         LiveDesktop.shared.stop()
         staging = false
         cancelTimers()
@@ -151,6 +157,9 @@ final class LidFold {
             // otherwise the next close is silently ignored.
             if angle >= working - 4 { gate.reset() }
         }
+
+        // Before the arming guard: a lid that shuts during the first report still counts as shut.
+        lidClosed = isClosed(angle)
 
         // A start angle at or above the lid's resting angle would fold the moment Awake arms.
         if !armedSeenOpen {
@@ -538,6 +547,9 @@ final class LidFold {
             }
         }
     }
+
+    /// Test seam for the demo flags.
+    func receiveForDemo(_ angle: Double) { receive(angle) }
 
     /// Feeds one closed angle and one open angle, so the screen-off branch can be exercised
     /// without a physical lid.
