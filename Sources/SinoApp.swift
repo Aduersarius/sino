@@ -696,6 +696,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     private func syncLidFold() {
         // The sensor also drives screen-off and Low Power Mode, so it stays armed with the
         // animation set to Off.
+        foldLog("syncLidFold: awake \(isAwakeActive), preventLidSleep \(prefs.preventLidSleep)")
         if isAwakeActive && prefs.preventLidSleep {
             LidFold.shared.start()
         } else {
