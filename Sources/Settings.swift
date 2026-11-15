@@ -480,6 +480,7 @@ final class Prefs: ObservableObject {
         guard v != foldMode, ["fold", "blur", "off"].contains(v) else { return }
         foldMode = v
         save()
+        App.shared.refreshLidFeatures()
         // Off stops the animation, not the lid monitoring that screen-off and Low Power use.
         if App.shared.isAwakeActive, preventLidSleep {
             LidFold.shared.start()
@@ -522,6 +523,7 @@ final class Prefs: ObservableObject {
     func setSleepDisplayOnLidClose(_ on: Bool) {
         sleepDisplayOnLidClose = on
         save()
+        App.shared.refreshLidFeatures()
     }
 
     func setLowPowerOnLidClose(_ on: Bool) {

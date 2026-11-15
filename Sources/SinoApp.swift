@@ -173,11 +173,19 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         mainMenu.addItem(appItem)
         NSApp.mainMenu = mainMenu
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.stopAwake(resetPMSet: true, sync: true, keepPersisted: true, reason: "terminate")
+            // Quitting must hand the lid back: `disablesleep` outlives the process otherwise.
+            self?.stopAwake(resetPMSet: true, sync: true, keepPersisted: true, reason: "terminate",
+                            forceReset: true)
             self?.releaseFans()
         }
-        // Awake survives a relaunch: clearing `disablesleep` unconditionally here meant any
-        // restart (or crash relaunch) silently turned clamshell prevention off.
+        // "Prevent lid-close sleep" is a setting: it holds while Sino runs, whether or not an Awake
+        // session is active. Clearing `disablesleep` on every launch is what made the lid sleep.
+        if prefs.preventLidSleep {
+            PMSetHelper.setSleepDisabled(true)
+        } else if PMSetHelper.isSleepDisabled {
+            PMSetHelper.setSleepDisabled(false)
+        }
+        syncLidFold()
         if prefs.awakeActive {
             // A timed session must not come back as indefinite: resume only what is left of it,
             // and let an expired one die quietly.
@@ -189,10 +197,6 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     self?.startAwake(duration: remaining)
                 }
-            }
-        } else if PMSetHelper.isSleepDisabled {
-            DispatchQueue.global(qos: .utility).async {
-                PMSetHelper.setSleepDisabled(false)
             }
         }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -661,7 +665,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func handleLeftoverSleepDisabled() {
         guard PMSetHelper.isSleepDisabled else { return }
-        DispatchQueue.global(qos: .utility).async { PMSetHelper.setSleepDisabled(false) }
+        PMSetHelper.setSleepDisabled(prefs.preventLidSleep)
     }
 
     func startAwake(duration: TimeInterval? = nil) {
@@ -680,13 +684,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             prefs.setAwakeActive(true)
             prefs.setAwakeUntil(duration.map { Date().timeIntervalSince1970 + $0 } ?? 0)
             if prefs.preventLidSleep {
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    let ok = PMSetHelper.setSleepDisabled(true)
-                    if !ok {
-                        DispatchQueue.main.async {
-                            self?.prefs.setPreventLidSleep(false)
-                        }
-                    }
+                PMSetHelper.setSleepDisabled(true) { [weak self] ok in
+                    if !ok { self?.prefs.setPreventLidSleep(false) }
                 }
             }
             syncLidFold()
@@ -707,11 +706,18 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     /// The lid fold only runs while Awake is holding the system open with the lid closed.
+    /// Anything on the Sleep Prevention page that reacts to the lid keeps the sensor running.
+    private var lidFeaturesOn: Bool {
+        prefs.preventLidSleep || prefs.foldMode != "off" || prefs.sleepDisplayOnLidClose
+    }
+
+    func refreshLidFeatures() { syncLidFold() }
+
     private func syncLidFold() {
         // The sensor also drives screen-off and Low Power Mode, so it stays armed with the
         // animation set to Off.
-        foldLog("syncLidFold: awake \(isAwakeActive), preventLidSleep \(prefs.preventLidSleep)")
-        if isAwakeActive && prefs.preventLidSleep {
+        foldLog("syncLidFold: aware \(lidFeaturesOn), awake \(isAwakeActive), preventLidSleep \(prefs.preventLidSleep)")
+        if lidFeaturesOn {
             LidFold.shared.start()
         } else {
             LidFold.shared.stop()
@@ -719,7 +725,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func stopAwake(resetPMSet: Bool = true, sync: Bool = false, keepPersisted: Bool = false,
-                   reason: String = "explicit") {
+                   reason: String = "explicit", forceReset: Bool = false) {
         foldLog("stopAwake: \(reason), resetPMSet \(resetPMSet), keepPersisted \(keepPersisted)")
         if !keepPersisted { prefs.setAwakeActive(false) }
         awakeTimer?.invalidate()
@@ -729,13 +735,13 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             IOPMAssertionRelease(awakeAssertionID)
             awakeAssertionID = 0
         }
-        if resetPMSet && (prefs.preventLidSleep || PMSetHelper.isSleepDisabled) {
+        // On quit the state read is not evidence: an enable may still be queued behind this call.
+        // A forced reset always writes, and the serial queue makes it the last write.
+        if resetPMSet && (forceReset || (!prefs.preventLidSleep && PMSetHelper.isSleepDisabled)) {
             if sync {
-                PMSetHelper.setSleepDisabled(false)
+                PMSetHelper.setSleepDisabledNow(false)
             } else {
-                DispatchQueue.global(qos: .userInitiated).async {
-                    PMSetHelper.setSleepDisabled(false)
-                }
+                PMSetHelper.setSleepDisabled(false)
             }
         }
         isAwakeActive = false
@@ -753,15 +759,8 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func setPreventLidSleep(_ prevent: Bool) {
         prefs.setPreventLidSleep(prevent)
         syncLidFold()
-        if isAwakeActive {
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let ok = PMSetHelper.setSleepDisabled(prevent)
-                if !ok && prevent {
-                    DispatchQueue.main.async {
-                        self?.prefs.setPreventLidSleep(false)
-                    }
-                }
-            }
+        PMSetHelper.setSleepDisabled(prevent) { [weak self] ok in
+            if prevent, !ok { self?.prefs.setPreventLidSleep(false) }
         }
     }
 
@@ -4914,9 +4913,24 @@ enum PMSetHelper {
         return false
     }
 
+    private static let pmsetQueue = DispatchQueue(label: "com.lov3u.sino.pmset")
+
+    /// Serialised because launch and quit both write this key. Callers enqueue here directly —
+    /// wrapping this in their own global queue would let a quit-time clear overtake an enable
+    /// that had not reached the queue yet.
+    static func setSleepDisabled(_ disable: Bool, completion: ((Bool) -> Void)? = nil) {
+        pmsetQueue.async {
+            let ok = setPmset("disablesleep", disable)
+            if let completion {
+                DispatchQueue.main.async { completion(ok) }
+            }
+        }
+    }
+
+    /// Drains anything already queued, then applies `disable` last.
     @discardableResult
-    static func setSleepDisabled(_ disable: Bool) -> Bool {
-        setPmset("disablesleep", disable)
+    static func setSleepDisabledNow(_ disable: Bool) -> Bool {
+        pmsetQueue.sync { setPmset("disablesleep", disable) }
     }
 
     @discardableResult
