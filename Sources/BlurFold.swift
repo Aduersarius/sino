@@ -98,6 +98,8 @@ final class BlurFold {
         // spends most of the gesture under 1 pt. Strength sets the cap, 2 to 60 pt: at 1.0 the
         // screen has to be unreadable, and 20 pt still left shapes legible.
         let cap = 2 + 58 * min(1, max(0, strength))
-        return cap * p * p
+        // p^1.3 rather than p^2: the quadratic put almost all of the softening in the last third,
+        // which read as "nothing, then everything".
+        return cap * pow(p, 1.3)
     }
 }
