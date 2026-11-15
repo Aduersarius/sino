@@ -82,11 +82,9 @@ final class LidFold {
         drawCount = 0
         gestureStart = Date()
         foldLog("armed, fold starts at \(Int(working)) deg")
-        if !Prefs.shared.foldBlurOnly {
-            DesktopCapture.warm()
-            FoldOverlay.prewarm()
-        }
-        if DesktopCapture.hasBuiltInDisplay, !Prefs.shared.foldBlurOnly { LiveDesktop.shared.start() }
+        DesktopCapture.warm()
+        if !Prefs.shared.foldBlurOnly { FoldOverlay.prewarm() }
+        if DesktopCapture.hasBuiltInDisplay { LiveDesktop.shared.start() }
         LidSensor.shared.onChange = { [weak self] angle in self?.receive(angle) }
         LidSensor.shared.start()
     }
@@ -201,7 +199,7 @@ final class LidFold {
         switch state {
         case .captureRequested:
             capture()
-            if blurFold.isShowing { blurFold.update(angle: angle, working: working, tuning: tuning) }
+            if blurFold.isShowing { blurFold.update(angle: angle, tuning: tuning) }
         case .idle:
             stagedShots = nil
             staging = false
@@ -211,7 +209,7 @@ final class LidFold {
         }
 
         if blurFold.isShowing, !revealing {
-            blurFold.update(angle: angle, working: working, tuning: tuning)
+            blurFold.update(angle: angle, tuning: tuning)
         }
 
         guard showing else { return }
@@ -291,7 +289,7 @@ final class LidFold {
     /// angle is just a new opacity.
     private func apply(_ angle: Double) {
         if blurFold.isShowing {
-            blurFold.update(angle: angle, working: working, tuning: tuning)
+            blurFold.update(angle: angle, tuning: tuning)
         } else {
             overlay.update(angle: angle, tuning: tuning)
         }
@@ -353,7 +351,7 @@ final class LidFold {
     // MARK: Capture
 
     private func stage() {
-        guard !Prefs.shared.foldBlurOnly, DesktopCapture.hasBuiltInDisplay else { return }
+        guard DesktopCapture.hasBuiltInDisplay else { return }
         if NSScreen.screens.count <= 1 {
             staging = true          // the persistent stream supplies the frame; nothing to stage
             return
@@ -380,24 +378,7 @@ final class LidFold {
     private func capture() {
         guard !capturing else { return }
         // The blur mode never reads the screen: the compositor frosts the live desktop instead.
-        if Prefs.shared.foldBlurOnly {
-            // Mirror show(shots:): without captured/trough/gesture bookkeeping the gate stays in
-            // captureRequested and re-fires on every report, and idle tears it down again.
-            guard !blurFold.isShowing else { return }
-            revealing = false
-            idleHide?.cancel()
-            idleHide = nil
-            shownAngle = working
-            targetAngle = working
-            blurFold.show(angle: working, working: working, tuning: tuning)
-            gate.captured()
-            troughAngle = working
-            lastAngle = troughAngle
-            risingAt = .distantPast
-            gestureStart = Date()
-            foldLog("blur fold on \(NSScreen.screens.count) display(s), no capture")
-            return
-        }
+
         if let shots = stagedShots, Date().timeIntervalSince(stagedAt) < 0.8 {
             stagedShots = nil
             show(shots: shots, stagingMs: Date().timeIntervalSince(stagedAt) * 1000)
@@ -447,12 +428,16 @@ final class LidFold {
         shownAngle = working
         targetAngle = working
         let showStart = Date()
+        if Prefs.shared.foldBlurOnly {
+            blurFold.show(shots: shots, angle: working, tuning: tuning)
+        } else {
         do {
             try overlay.show(snapshots: shots, angle: working, tuning: tuning)
         } catch {
             foldLog("overlay failed: \(error.localizedDescription)")
             gate.fail()
             return
+        }
         }
         let showMs = Date().timeIntervalSince(showStart) * 1000
         gate.captured()
@@ -470,20 +455,25 @@ final class LidFold {
         previewingUntil = Date().addingTimeInterval(seconds + 1)
         Task { @MainActor in
             if Prefs.shared.foldBlurOnly {
-                shownAngle = working
-                blurFold.show(angle: working, working: working, tuning: tuning)
-                let start = Date()
-                while Date().timeIntervalSince(start) < seconds {
-                    try? await Task.sleep(nanoseconds: 40_000_000)
-                    let t = min(1, Date().timeIntervalSince(start) / (seconds * 0.6))
-                    // Sweep the whole progress range, not the first third: that is what the real
-                    // lid does between the working angle and the fade angle.
-                    let fade = tuning.validated.fadeAngle
-                    blurFold.update(angle: working - (working - fade) * t, working: working, tuning: tuning)
+                do {
+                    let shots = try await DesktopCapture.snapshots()
+                    guard !shots.isEmpty else { foldLog("preview found no displays"); return }
+                    shownAngle = working
+                    blurFold.show(shots: shots, angle: working, tuning: tuning)
+                    let start = Date()
+                    while Date().timeIntervalSince(start) < seconds {
+                        try? await Task.sleep(nanoseconds: 40_000_000)
+                        let t = min(1, Date().timeIntervalSince(start) / (seconds * 0.6))
+                        let fade = tuning.validated.fadeAngle
+                        blurFold.update(angle: working - (working - fade) * t, tuning: tuning)
+                    }
+                    blurFold.hide(fade: 0.2)
+                    foldLog("blur preview done")
+                    return
+                } catch {
+                    foldLog("blur preview failed: \(error.localizedDescription)")
+                    return
                 }
-                blurFold.hide(fade: 0.2)
-                foldLog("blur preview done")
-                return
             }
             do {
                 let shots = try await DesktopCapture.snapshots()
