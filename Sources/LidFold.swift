@@ -70,7 +70,7 @@ final class LidFold {
     var isArmed: Bool { enabled }
 
     func start() {
-        guard !enabled else { return }
+        guard !enabled, Prefs.shared.foldMode != "off" else { return }
         enabled = true
         armedSeenOpen = false
         loggedWaiting = false

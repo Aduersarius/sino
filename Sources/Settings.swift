@@ -151,7 +151,8 @@ final class Prefs: ObservableObject {
     @Published var lowPowerOnLidClose: Bool
     @Published var foldJitter: Double
     @Published var foldBlur: Double
-    @Published var foldBlurOnly: Bool
+    @Published var foldMode: String
+    var foldBlurOnly: Bool { foldMode == "blur" }
     @Published var bar: Set<String>
     @Published var barOrder: [String]
     @Published var drop: Set<String>
@@ -190,7 +191,8 @@ final class Prefs: ObservableObject {
         lowPowerOnLidClose = d.object(forKey: "sino.lowPowerOnLidClose") as? Bool ?? false
         foldJitter = d.object(forKey: "sino.foldJitter") as? Double ?? 0
         foldBlur = d.object(forKey: "sino.foldBlur") as? Double ?? 0.35
-        foldBlurOnly = d.object(forKey: "sino.foldBlurOnly") as? Bool ?? false
+        foldMode = d.string(forKey: "sino.foldMode")
+            ?? ((d.object(forKey: "sino.foldBlurOnly") as? Bool ?? false) ? "blur" : "fold")
         cpuProcMode = d.string(forKey: "sino.cpuProcMode") ?? d.string(forKey: "pulse.cpuProcMode") ?? "total"
         cpuProcCount = (d.object(forKey: "sino.cpuProcCount") ?? d.object(forKey: "pulse.cpuProcCount")) as? Int ?? 5
         ramProcCount = (d.object(forKey: "sino.ramProcCount") ?? d.object(forKey: "pulse.ramProcCount")) as? Int ?? 10
@@ -310,7 +312,7 @@ final class Prefs: ObservableObject {
         d.set(lowPowerOnLidClose, forKey: "sino.lowPowerOnLidClose")
         d.set(foldJitter, forKey: "sino.foldJitter")
         d.set(foldBlur, forKey: "sino.foldBlur")
-        d.set(foldBlurOnly, forKey: "sino.foldBlurOnly")
+        d.set(foldMode, forKey: "sino.foldMode")
         d.set(Array(bar), forKey: "sino.bar")
         d.set(barOrder, forKey: "sino.barOrder")
         d.set(Array(drop), forKey: "sino.drop")
@@ -458,14 +460,16 @@ final class Prefs: ObservableObject {
         nsColor("outline", fallback: NSColor.labelColor.withAlphaComponent(0.22))
     }
 
-    /// Both modes read the screen — the fold warps the frame, blur mode filters it — so the
-    /// stream only has to be up whenever the feature is armed.
-    func setFoldBlurOnly(_ v: Bool) {
-        guard v != foldBlurOnly else { return }
-        foldBlurOnly = v
+    /// "fold" (iPhone-Duo style), "blur" (progressive whole-screen blur) or "off". Both animated
+    /// modes read the screen, so the stream is only needed while one of them is armed.
+    func setFoldMode(_ v: String) {
+        guard v != foldMode, ["fold", "blur", "off"].contains(v) else { return }
+        foldMode = v
         save()
-        if LidFold.shared.isArmed, DesktopCapture.hasBuiltInDisplay {
-            LiveDesktop.shared.start()
+        if v == "off" {
+            LidFold.shared.stop()
+        } else if App.shared.isAwakeActive, preventLidSleep {
+            LidFold.shared.start()
         }
     }
 

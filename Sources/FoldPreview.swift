@@ -103,12 +103,19 @@ struct FoldPreviewCard: View {
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-            Toggle("Blur the screen instead of folding it", isOn: Binding(
-                get: { prefs.foldBlurOnly },
-                set: { prefs.setFoldBlurOnly($0) }))
-                .toggleStyle(.checkbox)
-                .font(.system(size: 11))
-            if !prefs.foldBlurOnly {
+            HStack(spacing: 8) {
+                Text("On lid close").font(.system(size: 11))
+                Picker("", selection: Binding(get: { prefs.foldMode }, set: { prefs.setFoldMode($0) })) {
+                Text("Fold").tag("fold")
+                Text("Blur").tag("blur")
+                Text("Off").tag("off")
+            }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 180)
+                Spacer()
+            }
+            if prefs.foldMode == "fold" {
                 HStack(spacing: 8) {
                     Text("Frost").font(.system(size: 11))
                     Slider(value: Binding(get: { prefs.foldBlur },

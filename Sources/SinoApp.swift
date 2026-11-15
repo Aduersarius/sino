@@ -665,7 +665,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     /// The lid fold only runs while Awake is holding the system open with the lid closed.
     private func syncLidFold() {
-        if isAwakeActive && prefs.preventLidSleep {
+        if isAwakeActive && prefs.preventLidSleep && prefs.foldMode != "off" {
             LidFold.shared.start()
         } else {
             LidFold.shared.stop()
