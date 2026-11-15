@@ -608,11 +608,13 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     /// ended the Awake session and cleared lid-sleep prevention.
     @discardableResult
     func handleAwakeRightClick() -> Bool {
+        // The feature switch comes first: with right-click toggle disabled the event keeps its
+        // normal path, lid shut or not.
+        guard prefs.rightClickAwake else { return false }
         if LidFold.shared.isLidShut {
             foldLog("right-click ignored: the lid is shut")
             return true
         }
-        guard prefs.rightClickAwake else { return false }
         toggleAwakeWithFlash(source: "right-click")
         return true
     }
