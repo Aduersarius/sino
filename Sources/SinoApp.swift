@@ -178,18 +178,6 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
                             forceReset: true)
             self?.releaseFans()
         }
-        // "Prevent lid-close sleep" is a setting: it holds while Sino runs, whether or not an Awake
-        // session is active. Clearing `disablesleep` on every launch is what made the lid sleep.
-        if prefs.preventLidSleep {
-            PMSetHelper.setSleepDisabled(true) { [weak self] ok in
-                guard !ok else { return }
-                // Without the rule the lid will sleep the Mac; show the setting as it really is.
-                foldLog("launch: could not apply lid-sleep prevention, switching the setting off")
-                self?.prefs.setPreventLidSleep(false)
-            }
-        } else if PMSetHelper.isSleepDisabled {
-            PMSetHelper.setSleepDisabled(false)
-        }
         syncLidFold()
         if prefs.awakeActive {
             // A timed session must not come back as indefinite: resume only what is left of it,
@@ -197,12 +185,17 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             let remaining = prefs.awakeUntil > 0 ? prefs.awakeUntil - Date().timeIntervalSince1970 : nil
             if let remaining, remaining <= 0 {
                 prefs.setAwakeActive(false)
-                handleLeftoverSleepDisabled()
+                // An expired session owns nothing: clear any leftover, whatever the toggle says.
+                PMSetHelper.setSleepDisabled(false)
             } else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     self?.startAwake(duration: remaining)
                 }
             }
+        } else {
+            // No session to resume: any `disablesleep` left behind would stop the lid from ever
+            // sleeping, so clear it without asking the current state.
+            PMSetHelper.setSleepDisabled(false)
         }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let button = item.button else { return }
@@ -668,11 +661,6 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         set { setPreventLidSleep(newValue) }
     }
 
-    private func handleLeftoverSleepDisabled() {
-        guard PMSetHelper.isSleepDisabled else { return }
-        PMSetHelper.setSleepDisabled(prefs.preventLidSleep)
-    }
-
     func startAwake(duration: TimeInterval? = nil) {
         stopAwake(resetPMSet: false)
         let type = prefs.preventDisplaySleep ? kIOPMAssertionTypePreventUserIdleDisplaySleep : kIOPMAssertionTypePreventUserIdleSystemSleep
@@ -711,18 +699,13 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     /// The lid fold only runs while Awake is holding the system open with the lid closed.
-    /// Anything on the Sleep Prevention page that reacts to the lid keeps the sensor running.
-    private var lidFeaturesOn: Bool {
-        prefs.preventLidSleep || prefs.foldMode != "off" || prefs.sleepDisplayOnLidClose
-    }
-
     func refreshLidFeatures() { syncLidFold() }
 
     private func syncLidFold() {
-        // The sensor also drives screen-off and Low Power Mode, so it stays armed with the
-        // animation set to Off.
-        foldLog("syncLidFold: aware \(lidFeaturesOn), awake \(isAwakeActive), preventLidSleep \(prefs.preventLidSleep)")
-        if lidFeaturesOn {
+        // Awake is the mode that keeps the Mac running with the lid shut. With it off, closing the
+        // lid sleeps the Mac as macOS intends, so the sensor stays idle too.
+        foldLog("syncLidFold: awake \(isAwakeActive), preventLidSleep \(prefs.preventLidSleep)")
+        if isAwakeActive {
             LidFold.shared.start()
         } else {
             LidFold.shared.stop()
@@ -742,7 +725,9 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
         // On quit the state read is not evidence: an enable may still be queued behind this call.
         // A forced reset always writes, and the serial queue makes it the last write.
-        if resetPMSet && (forceReset || (!prefs.preventLidSleep && PMSetHelper.isSleepDisabled)) {
+        if resetPMSet {
+            // Unconditional: the state read races a queued enable, so a skipped write here is
+            // exactly how prevention used to survive the session that owned it.
             if sync {
                 PMSetHelper.setSleepDisabledNow(false)
             } else {
@@ -764,6 +749,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func setPreventLidSleep(_ prevent: Bool) {
         prefs.setPreventLidSleep(prevent)
         syncLidFold()
+        guard isAwakeActive else { return }
         PMSetHelper.setSleepDisabled(prevent) { [weak self] ok in
             if prevent, !ok { self?.prefs.setPreventLidSleep(false) }
         }
