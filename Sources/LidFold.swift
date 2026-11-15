@@ -52,6 +52,7 @@ final class LidFold {
     private var armedSeenOpen = false
     private var loggedWaiting = false
     private var lowPowerApplied = false
+    private var displaySleepApplied = false
     private var peakAngle: Double = 0
     private var troughAngle: Double = 0
     private var lastAngle: Double = 0
@@ -179,6 +180,14 @@ final class LidFold {
         if angle > peakAngle { peakAngle = angle }
         if angle < troughAngle { troughAngle = angle }
 
+        if Prefs.shared.sleepDisplayOnLidClose {
+            let closed = angle <= working - 4
+            if closed != displaySleepApplied {
+                displaySleepApplied = closed
+                if closed { sleepBuiltInDisplay() }
+            }
+        }
+
         if Prefs.shared.lowPowerOnLidClose {
             let closed = angle <= working - 4
             if closed != lowPowerApplied {
@@ -297,6 +306,23 @@ final class LidFold {
             blurFold.update(angle: angle, working: working, tuning: tuning)
         } else {
             overlay.update(angle: angle, tuning: tuning)
+        }
+    }
+
+    /// The lid covers the built-in panel, so leaving it lit wastes power for nothing. Only done
+    /// when it is the sole display: with an external one attached, sleeping "the displays" would
+    /// black out the screen the user is actually looking at.
+    private func sleepBuiltInDisplay() {
+        guard NSScreen.screens.count <= 1 else {
+            foldLog("lid closed with an external display, leaving the screen on")
+            return
+        }
+        foldLog("lid closed: sleeping the display")
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        task.arguments = ["displaysleepnow"]
+        do { try task.run() } catch {
+            foldLog("display sleep failed: \(error.localizedDescription)")
         }
     }
 

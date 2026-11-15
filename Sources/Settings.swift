@@ -149,6 +149,7 @@ final class Prefs: ObservableObject {
     @Published var interval: Double
     @Published var foldAngle: Double
     @Published var lowPowerOnLidClose: Bool
+    @Published var sleepDisplayOnLidClose: Bool
     @Published var foldJitter: Double
     @Published var foldBlur: Double
     @Published var foldBlurStrength: Double
@@ -190,6 +191,7 @@ final class Prefs: ObservableObject {
         interval = (d.object(forKey: "sino.interval") ?? d.object(forKey: "pulse.interval")) as? Double ?? 1
         foldAngle = d.object(forKey: "sino.foldAngle") as? Double ?? 105
         lowPowerOnLidClose = d.object(forKey: "sino.lowPowerOnLidClose") as? Bool ?? false
+        sleepDisplayOnLidClose = d.object(forKey: "sino.sleepDisplayOnLidClose") as? Bool ?? false
         foldJitter = d.object(forKey: "sino.foldJitter") as? Double ?? 0
         foldBlur = d.object(forKey: "sino.foldBlur") as? Double ?? 0.35
         foldBlurStrength = d.object(forKey: "sino.foldBlurStrength") as? Double ?? 0.55
@@ -312,6 +314,7 @@ final class Prefs: ObservableObject {
         d.set(interval, forKey: "sino.interval")
         d.set(foldAngle, forKey: "sino.foldAngle")
         d.set(lowPowerOnLidClose, forKey: "sino.lowPowerOnLidClose")
+        d.set(sleepDisplayOnLidClose, forKey: "sino.sleepDisplayOnLidClose")
         d.set(foldJitter, forKey: "sino.foldJitter")
         d.set(foldBlur, forKey: "sino.foldBlur")
         d.set(foldBlurStrength, forKey: "sino.foldBlurStrength")
@@ -491,6 +494,11 @@ final class Prefs: ObservableObject {
     /// Degrees of lid movement ignored before the fold redraws. 0 redraws on every report.
     func setFoldJitter(_ v: Double) {
         foldJitter = min(5, max(0, v))
+        save()
+    }
+
+    func setSleepDisplayOnLidClose(_ on: Bool) {
+        sleepDisplayOnLidClose = on
         save()
     }
 
@@ -1211,6 +1219,15 @@ struct SettingsRoot: View {
                     Toggle("", isOn: Binding(
                         get: { prefs.preventLidSleep },
                         set: { app.setPreventLidSleep($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+                Divider().padding(.leading, 14)
+                row("Turn the screen off when the lid closes") {
+                    Toggle("", isOn: Binding(
+                        get: { prefs.sleepDisplayOnLidClose },
+                        set: { prefs.setSleepDisplayOnLidClose($0) }
                     ))
                     .labelsHidden()
                     .toggleStyle(.switch)
