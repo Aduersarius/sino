@@ -1091,6 +1091,7 @@ struct SettingsRoot: View {
         case "drop": return ("Dropdown", "rectangle.split.2x1", Color(red: 0.62, green: 0.35, blue: 0.95))
         case "toolbar": return ("Toolbar", "menubar.dock.rectangle", Color(red: 0.95, green: 0.55, blue: 0.15))
         case "fans": return ("Fans", "fan", Color(red: 0.20, green: 0.72, blue: 0.78))
+        case "awake": return ("Sleep Prevention", "cup.and.saucer.fill", Color(red: 0.80, green: 0.36, blue: 0.20))
         case "about": return ("About", "info.circle.fill", Color(red: 0.20, green: 0.52, blue: 0.96))
         default: return ("General", "gearshape.fill", Color(red: 0.55, green: 0.55, blue: 0.58))
         }
@@ -1162,11 +1163,68 @@ struct SettingsRoot: View {
         case "drop": dropdownPage
         case "toolbar": toolbarPage
         case "fans": fansPage
+        case "awake": awakePage
         case "about": aboutPage
         default: generalPage
         }
     }
 
+
+    var awakePage: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            section("Shortcut") {
+                row("Global shortcut") {
+                    AwakeShortcutRow(prefs: prefs)
+                }
+                Divider().padding(.leading, 14)
+                row("Right-click status bar to toggle") {
+                    Toggle("", isOn: Binding(
+                        get: { prefs.rightClickAwake },
+                        set: { prefs.setRightClickAwake($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+            }
+            section("Sleep") {
+                row("Prevent display sleep") {
+                    Toggle("", isOn: Binding(
+                        get: { app.preventDisplaySleep },
+                        set: { app.setPreventDisplaySleep($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+                Divider().padding(.leading, 14)
+                row("Prevent lid-close sleep (clamshell)") {
+                    Toggle("", isOn: Binding(
+                        get: { prefs.preventLidSleep },
+                        set: { app.setPreventLidSleep($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+                Divider().padding(.leading, 14)
+                row("Low Power Mode when lid closes") {
+                    Toggle("", isOn: Binding(
+                        get: { prefs.lowPowerOnLidClose },
+                        set: { prefs.setLowPowerOnLidClose($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
+            }
+            section("Lid fold") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Preview").font(Chrome.text).foregroundStyle(.primary)
+                    FoldPreviewCard()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 11)
+            }
+        }
+    }
     var generalPage: some View {
         VStack(alignment: .leading, spacing: 16) {
             section("Update") {
@@ -1274,55 +1332,6 @@ struct SettingsRoot: View {
                 Divider().padding(.leading, 14)
                 row("Quit Sino") {
                     Button("Quit") { NSApp.terminate(nil) }
-                }
-            }
-            section("Sleep Prevention (Awake)") {
-                row("Global shortcut") {
-                    AwakeShortcutRow(prefs: prefs)
-                }
-                Divider().padding(.leading, 14)
-                row("Prevent display sleep") {
-                    Toggle("", isOn: Binding(
-                        get: { app.preventDisplaySleep },
-                        set: { app.setPreventDisplaySleep($0) }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                }
-                Divider().padding(.leading, 14)
-                row("Prevent lid-close sleep (clamshell)") {
-                    Toggle("", isOn: Binding(
-                        get: { prefs.preventLidSleep },
-                        set: { app.setPreventLidSleep($0) }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                }
-                Divider().padding(.leading, 14)
-                row("Low Power Mode when lid closes") {
-                    Toggle("", isOn: Binding(
-                        get: { prefs.lowPowerOnLidClose },
-                        set: { prefs.setLowPowerOnLidClose($0) }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                }
-                Divider().padding(.leading, 14)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Lid fold preview").font(Chrome.text).foregroundStyle(.primary)
-                    FoldPreviewCard()
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 11)
-                Divider().padding(.leading, 14)
-                row("Right-click status bar to toggle") {
-                    Toggle("", isOn: Binding(
-                        get: { prefs.rightClickAwake },
-                        set: { prefs.setRightClickAwake($0) }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
                 }
             }
             section("Toolbar") {
@@ -1737,6 +1746,7 @@ struct SettingsRoot: View {
             nav("drop", "Dropdown", "rectangle.split.2x1", Color(red: 0.62, green: 0.35, blue: 0.95))
             nav("toolbar", "Toolbar", "menubar.dock.rectangle", Color(red: 0.95, green: 0.55, blue: 0.15))
             nav("fans", "Fans", "fan", Color(red: 0.20, green: 0.72, blue: 0.78))
+            nav("awake", "Sleep Prevention", "cup.and.saucer.fill", Color(red: 0.80, green: 0.36, blue: 0.20))
             nav("about", "About", "info.circle.fill", Color(red: 0.20, green: 0.52, blue: 0.96))
             Spacer(minLength: 0)
         }

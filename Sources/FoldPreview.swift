@@ -103,20 +103,23 @@ struct FoldPreviewCard: View {
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-            HStack(spacing: 8) {
-                Text("Blur").font(.system(size: 11))
-                Toggle("Blur the screen instead of folding it (no screen recording)", isOn: Binding(
-                    get: { prefs.foldBlurOnly },
-                    set: { prefs.setFoldBlurOnly($0) }))
-                    .font(.caption)
-                Slider(value: Binding(get: { prefs.foldBlur },
-                                      set: { prefs.setFoldBlur($0) }),
-                       in: 0...1, step: 0.05)
-                    .frame(width: 130)
-                Text(String(format: "%.2f", prefs.foldBlur))
-                    .font(.system(size: 11, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Spacer()
+            Toggle("Blur the screen instead of folding it", isOn: Binding(
+                get: { prefs.foldBlurOnly },
+                set: { prefs.setFoldBlurOnly($0) }))
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
+            if !prefs.foldBlurOnly {
+                HStack(spacing: 8) {
+                    Text("Frost").font(.system(size: 11))
+                    Slider(value: Binding(get: { prefs.foldBlur },
+                                          set: { prefs.setFoldBlur($0) }),
+                           in: 0...1, step: 0.05)
+                        .frame(width: 130)
+                    Text(String(format: "%.2f", prefs.foldBlur))
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
             }
             HStack(spacing: 8) {
                 Text("Ignore lid jitter").font(.system(size: 11))

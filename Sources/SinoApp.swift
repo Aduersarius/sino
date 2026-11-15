@@ -94,6 +94,11 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
         if let idx = CommandLine.arguments.firstIndex(of: "--render-settings-png"), idx + 1 < CommandLine.arguments.count {
             let out = CommandLine.arguments[idx + 1]
+            if let pageIndex = CommandLine.arguments.firstIndex(of: "--page"),
+               pageIndex + 1 < CommandLine.arguments.count {
+                selectSettingsPage(CommandLine.arguments[pageIndex + 1])
+            }
+            openSettings()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 if let w = self?.settingsWC?.window, let view = w.contentView {
                     let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
