@@ -115,7 +115,12 @@ struct FoldPreviewCard: View {
                 .frame(width: 180)
                 Spacer()
             }
-            if prefs.foldMode == "blur" {
+            if prefs.foldMode == "blur" && !SkyLightBlur.isAvailable {
+                Text("Blur isn\u{2019}t available on this macOS version \u{2014} use Fold, or Off.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+            }
+            if prefs.foldMode == "blur" && SkyLightBlur.isAvailable {
                 HStack(spacing: 8) {
                     Text("Strength").font(.system(size: 11))
                     Slider(value: Binding(get: { prefs.foldBlurStrength },

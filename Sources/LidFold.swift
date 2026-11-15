@@ -390,7 +390,11 @@ final class LidFold {
             idleHide = nil
             shownAngle = working
             targetAngle = working
-            blurFold.show(angle: working, working: working, tuning: tuning)
+            guard blurFold.show(angle: working, working: working, tuning: tuning) else {
+                foldLog("blur unavailable on this system, skipping the fold")
+                gate.fail()
+                return
+            }
             gate.captured()
             troughAngle = working
             lastAngle = troughAngle
@@ -507,7 +511,10 @@ final class LidFold {
                 if true {
                     guard !NSScreen.screens.isEmpty else { foldLog("preview found no displays"); return }
                     shownAngle = working
-                    blurFold.show(angle: working, working: working, tuning: tuning)
+                    guard blurFold.show(angle: working, working: working, tuning: tuning) else {
+                        foldLog("blur unavailable on this system")
+                        return
+                    }
                     let start = Date()
                     while Date().timeIntervalSince(start) < seconds {
                         try? await Task.sleep(nanoseconds: 40_000_000)

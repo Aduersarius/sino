@@ -12,12 +12,19 @@ import AppKit
 final class BlurFold {
     private var panels: [NSPanel] = []
     private var fadeOut: DispatchWorkItem?
+    private var fadeTimer: Timer?
+    private var lastRadius: Double = 0
 
     var isShowing: Bool { !panels.isEmpty }
 
-    func show(angle: Double, working: Double, tuning: FoldTuning) {
-        guard panels.isEmpty else { return }
+    /// False when the window server entry point is missing, so the caller can tell the gate that no
+    /// surface exists instead of pretending one does.
+    @discardableResult
+    func show(angle: Double, working: Double, tuning: FoldTuning) -> Bool {
+        guard SkyLightBlur.isAvailable else { return false }
+        guard panels.isEmpty else { return true }
         fadeOut?.cancel(); fadeOut = nil
+        fadeTimer?.invalidate(); fadeTimer = nil
         for screen in NSScreen.screens {
             let panel = NSPanel(contentRect: screen.frame,
                                 styleMask: [.borderless, .nonactivatingPanel],
@@ -42,30 +49,46 @@ final class BlurFold {
             panels.append(panel)
         }
         update(angle: angle, working: working, tuning: tuning)
+        return true
     }
 
     func update(angle: Double, working: Double, tuning: FoldTuning) {
         guard !panels.isEmpty else { return }
         let progress = FoldMath.progress(angle: angle, tuning: tuning)
         let radius = Self.radius(for: progress, strength: Prefs.shared.foldBlurStrength)
+        lastRadius = radius
         for panel in panels { SkyLightBlur.setRadius(Int32(panel.windowNumber), radius) }
     }
 
+    /// Ramps the radius down over `fade` instead of cutting it. The panels themselves must stay
+    /// opaque meanwhile: fading their 1% white fill animates nothing at all.
     func hide(fade: TimeInterval = 0) {
         guard !panels.isEmpty else { return }
+        fadeTimer?.invalidate()
         let items = panels
+        let start = lastRadius
         panels = []
-        for panel in items { SkyLightBlur.setRadius(Int32(panel.windowNumber), 0) }
         let finish = DispatchWorkItem {
-            for panel in items { panel.orderOut(nil) }
+            for panel in items {
+                SkyLightBlur.setRadius(Int32(panel.windowNumber), 0)
+                panel.orderOut(nil)
+            }
+            foldLog("blur hidden")
         }
         fadeOut = finish
-        guard fade > 0 else { finish.perform(); return }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = fade
-            for panel in items { panel.animator().alphaValue = 0 }
-        } completionHandler: {
-            finish.perform()
+        guard fade > 0, start > 0.5 else { finish.perform(); return }
+
+        let steps = max(1, Int(fade / 0.02))
+        foldLog(String(format: "blur fading from %.1f pt over %.2f s", start, fade))
+        var step = 0
+        fadeTimer = Timer.scheduledTimer(withTimeInterval: fade / Double(steps), repeats: true) { timer in
+            step += 1
+            let radius = start * (1 - Double(step) / Double(steps))
+            for panel in items { SkyLightBlur.setRadius(Int32(panel.windowNumber), radius) }
+            if step >= steps {
+                timer.invalidate()
+                finish.perform()
+            }
         }
     }
 
@@ -98,11 +121,15 @@ enum SkyLightBlur {
         return unsafeBitCast(sym, to: ConnFn.self)()
     }()
 
+    /// A dlsym miss is not a crash: it means blur mode has nothing to draw. SINO_NO_SKYLIGHT=1
+    /// forces that state so the degradation path can be exercised on a machine where it exists.
+    static let isAvailable: Bool = {
+        if ProcessInfo.processInfo.environment["SINO_NO_SKYLIGHT"] == "1" { return false }
+        return setter != nil && connection != 0
+    }()
+
     static func setRadius(_ window: Int32, _ radius: Double) {
-        guard let setter, connection != 0 else {
-            foldLog("skylight: window blur unavailable, no effect")
-            return
-        }
+        guard isAvailable, let setter else { return }
         _ = setter(connection, window, Int32(radius.rounded()))
     }
 }
