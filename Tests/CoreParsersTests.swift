@@ -11,6 +11,17 @@ struct CoreParsersTests {
             }
         }
 
+        // CPUCoreLayout: label
+        check(CPUCoreLayout.label(index: 0, eCores: 6, pCores: 5, totalCores: 11) == "Efficiency Core #1", "6E+5P index 0 is Efficiency Core #1")
+        check(CPUCoreLayout.label(index: 5, eCores: 6, pCores: 5, totalCores: 11) == "Efficiency Core #6", "6E+5P index 5 is Efficiency Core #6")
+        check(CPUCoreLayout.label(index: 6, eCores: 6, pCores: 5, totalCores: 11) == "Performance Core #1", "6E+5P index 6 is Performance Core #1")
+        check(CPUCoreLayout.label(index: 10, eCores: 6, pCores: 5, totalCores: 11) == "Performance Core #5", "6E+5P index 10 is Performance Core #5")
+        check(CPUCoreLayout.label(index: 3, eCores: 4, pCores: 4, totalCores: 8) == "Efficiency Core #4", "4E+4P index 3 is Efficiency Core #4")
+        check(CPUCoreLayout.label(index: 4, eCores: 4, pCores: 4, totalCores: 8) == "Performance Core #1", "4E+4P index 4 is Performance Core #1")
+        check(CPUCoreLayout.label(index: 0, eCores: 6, pCores: 5, totalCores: 12) == "Core #1", "mismatched counts fall back to Core #1")
+        check(CPUCoreLayout.label(index: 2, eCores: 0, pCores: 4, totalCores: 4) == "Core #3", "zero eCores falls back to Core #3")
+        check(CPUCoreLayout.label(index: 1, eCores: 4, pCores: 0, totalCores: 4) == "Core #2", "zero pCores falls back to Core #2")
+
         let validHex = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         let upperHex = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"
 

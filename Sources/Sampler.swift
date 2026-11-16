@@ -325,18 +325,8 @@ final class Sampler: ObservableObject {
             s.cpuMin = valid.min() ?? total
             s.cpuMax = valid.max() ?? total
             s.cpuAvg = valid.reduce(0, +) / Double(max(valid.count, 1))
-            // host_processor_info lists P-cores first on Apple Silicon
-            let p = (pCores > 0 && eCores + pCores == cores) ? pCores : 0
             s.cores = coreUsage.enumerated().map { i, v in
-                let name: String
-                if p > 0, i < p {
-                    name = "Performance Core #\(i + 1)"
-                } else if p > 0 {
-                    name = "Efficiency Core #\(i - p + 1)"
-                } else {
-                    name = "Core #\(i + 1)"
-                }
-                return CoreSample(id: i, name: name, usage: v)
+                CoreSample(id: i, name: CPUCoreLayout.label(index: i, eCores: eCores, pCores: pCores, totalCores: cores), usage: v)
             }
         }
         prevTicks = load
