@@ -67,6 +67,13 @@ struct CoreParsersTests {
             check(false, "failed to write tempFile: \(error)")
         }
 
+        // PMSetParser: isValidPosixUsername (goes into sudoers)
+        check(PMSetParser.isValidPosixUsername("lov3u"), "lov3u is a valid user name")
+        check(!PMSetParser.isValidPosixUsername("a b"), "user name with space is invalid")
+        check(!PMSetParser.isValidPosixUsername("x;rm"), "user name with ';' is invalid")
+        check(!PMSetParser.isValidPosixUsername(""), "empty user name is invalid")
+        check(!PMSetParser.isValidPosixUsername(String(repeating: "a", count: 65)), "65-char user name is invalid")
+
         if failures == 0 {
             print("core parsers: all checks passed")
         } else {

@@ -4897,18 +4897,32 @@ enum FanCtl {
 }
 
 enum PMSetHelper {
-    static let sudoersFile = "/private/etc/sudoers.d/sino_awake"
-    static let sudoersBody = "Cmnd_Alias SINO_PMSET = /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a lowpowermode 1, /usr/bin/pmset -a lowpowermode 0\n%admin ALL=(ALL) NOPASSWD: SINO_PMSET\n"
+    static let legacySudoersFile = "/private/etc/sudoers.d/sino_awake"
+    static let sudoersFile = "/private/etc/sudoers.d/sino_awake_v2"
+    /// sudo ignores sudoers.d names containing a ".", so the temp file is inert until moved.
+    private static let sudoersTemp = "/private/etc/sudoers.d/.sino_awake_v2.tmp"
+
+    /// Current user only; nil when the user name is unsafe to put into sudoers.
+    static var sudoersBody: String? {
+        let user = NSUserName()
+        guard PMSetParser.isValidPosixUsername(user) else { return nil }
+        return "Cmnd_Alias SINO_PMSET = /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a lowpowermode 1, /usr/bin/pmset -a lowpowermode 0\n\(user) ALL=(root) NOPASSWD: SINO_PMSET\n"
+    }
 
     static var isSudoersInstalled: Bool {
         FileManager.default.fileExists(atPath: sudoersFile)
     }
 
+    /// The only writer of the rule: visudo-checked before it goes live, then the legacy file is removed.
+    private static func installCommand(_ body: String) -> String {
+        "printf '%s' '\(body)' > \(sudoersTemp) && /usr/sbin/visudo -cf \(sudoersTemp) && chmod 0440 \(sudoersTemp) && mv \(sudoersTemp) \(sudoersFile) && rm -f \(legacySudoersFile)"
+    }
+
     @discardableResult
     static func installSudoers() -> Bool {
         if isSudoersInstalled { return true }
-        let cmd = "printf '%s' '\(sudoersBody)' > \(sudoersFile) && chmod 0440 \(sudoersFile)"
-        return runPrivileged(cmd)
+        guard let body = sudoersBody else { return false }
+        return runPrivileged(installCommand(body))
     }
 
     static var isSleepDisabled: Bool { pmsetFlag("SleepDisabled") }
@@ -4980,8 +4994,8 @@ enum PMSetHelper {
             sudoProc.waitUntilExit()
             if sudoProc.terminationStatus == 0 { return true }
         } catch {}
-        let cmd = "printf '%s' '\(sudoersBody)' > \(sudoersFile) && chmod 0440 \(sudoersFile) && /usr/bin/pmset -a \(key) \(val)"
-        return runPrivileged(cmd)
+        guard let body = sudoersBody else { return false }
+        return runPrivileged(installCommand(body) + " && /usr/bin/pmset -a \(key) \(val)")
     }
 
     private static func runPrivileged(_ command: String) -> Bool {

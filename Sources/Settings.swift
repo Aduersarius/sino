@@ -3165,7 +3165,7 @@ struct OnboardingView: View {
                                     .controlSize(.small)
                                 }
                             }
-                            Text("Allows Awake to keep your MacBook awake when the lid is closed. Installs a passwordless pmset rule (/etc/sudoers.d/sino_awake) via an admin prompt.")
+                            Text("Allows Awake to keep your MacBook awake when the lid is closed. Installs a passwordless pmset rule for the current user only (/etc/sudoers.d/sino_awake_v2) via an admin prompt.")
                                 .font(Chrome.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
