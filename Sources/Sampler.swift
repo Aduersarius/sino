@@ -743,7 +743,7 @@ final class Sampler: ObservableObject {
                 s.netRouter = "—"
             }
         }
-        kickPublicIP()
+        if heavy || dumping { kickPublicIP() }
     }
 
     func runHeavy() {
@@ -802,12 +802,13 @@ final class Sampler: ObservableObject {
             completion?()
             return
         }
-        // Use secure HTTPS endpoint (ipinfo.io with fallback to https://ipwho.is)
+        // HTTPS, ipinfo.io only
         guard let url = URL(string: "https://ipinfo.io/json") else {
             completion?()
             return
         }
         publicIPBusy = true
+        publicIPAt = Date()  // throttle failures as well as successes
         var req = URLRequest(url: url)
         req.timeoutInterval = 8
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
