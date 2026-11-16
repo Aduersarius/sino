@@ -20,7 +20,7 @@ build links it without `-framework Security` (`Undefined symbols … _SecCodeChe
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| [001](001-build-the-working-tree.md) | build.sh builds the current tree; CoreParsers has tests | P1 | S | 000 | TODO |
+| [001](001-build-the-working-tree.md) | build.sh builds the current tree; CoreParsers has tests | P1 | S | 000 | DONE — reviewed 2026-11-17, branch `advisor/001-build-the-working-tree` (not merged) |
 | [002](002-core-labels.md) | Per-core labels match the E-first layout | P1 | S | 001 | TODO |
 | [003](003-updater-verify.md) | Updater verifies in Swift, no shell built from network data | P1 | S | 001 | TODO |
 | [004](004-install-fallback.md) | install.sh source fallback leaves an installed app | P2 | S | — | TODO |
