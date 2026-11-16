@@ -8,6 +8,10 @@ ZIP="$TMP/Sino.app.zip"
 if curl -fsSL -o "$ZIP" "https://github.com/Aduersarius/sino/releases/latest/download/Sino.app.zip"; then
   ditto -x -k "$ZIP" "$TMP"
   APP=$(find "$TMP" -maxdepth 2 -name 'Sino.app' | head -1)
+  [ -n "$APP" ] || { echo "release zip has no Sino.app"; exit 1; }
+  rm -rf "$DEST"
+  cp -R "$APP" "$DEST"
+  find "$DEST" -exec xattr -c {} + 2>/dev/null || true
 else
   if ! xcode-select -p >/dev/null 2>&1; then
     echo "install CLT first: xcode-select --install"
@@ -16,11 +20,7 @@ else
   curl -fsSL https://github.com/Aduersarius/sino/archive/refs/heads/main.tar.gz | tar -xz -C "$TMP"
   cd "$TMP"/sino-main
   chmod +x build.sh
-  ./build.sh
-  APP="$TMP/sino-main/Sino.app"
+  ./build.sh   # builds, signs and installs into /Applications/Sino.app itself
 fi
-rm -rf "$DEST"
-cp -R "$APP" "$DEST"
-find "$DEST" -exec xattr -c {} + 2>/dev/null || true
 open "$DEST"
 echo "installed $DEST"
