@@ -14,7 +14,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cc -O2 -o /tmp/sino-smcwrite "$ROOT/Sources/smcwrite.c" \
   -isysroot "$SDK" -target arm64-apple-macos14.0 \
-  -framework IOKit -framework CoreFoundation -framework Security
+  -framework IOKit -framework CoreFoundation -framework Security -lbsm
+codesign -s "$SIGN_ID" --force --identifier com.lov3u.sino.smcwrite /tmp/sino-smcwrite >/dev/null
+if [ "$SIGN_ID" = "-" ]; then echo 'warning: no "Sino Dev" identity — fan control will be refused by the helper'; fi
 cp /tmp/sino-smcwrite "$APP/Contents/Resources/sino-smcwrite"
 mkdir -p /tmp/sino_build
 rm -rf /tmp/sino_build/*

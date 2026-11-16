@@ -2,6 +2,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <Security/Security.h>
+#include <bsm/libbsm.h>
 #include <copyfile.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -198,16 +199,16 @@ static int set_fan(int i, float rpm) {
 static int peer_signer_matches_self(CFDictionaryRef peer_info) {
     SecCodeRef self_code = NULL;
     CFDictionaryRef self_info = NULL;
-    int ok = 1;
+    int ok = 0;
 
     if (SecCodeCopySelf(kSecCSDefaultFlags, &self_code) == errSecSuccess && self_code) {
         if (SecCodeCopySigningInformation(self_code, kSecCSSigningInformation, &self_info) == errSecSuccess && self_info) {
             CFArrayRef self_certs = CFDictionaryGetValue(self_info, kSecCodeInfoCertificates);
             if (self_certs && CFArrayGetCount(self_certs) > 0) {
                 CFArrayRef peer_certs = CFDictionaryGetValue(peer_info, kSecCodeInfoCertificates);
-                if (!peer_certs || CFArrayGetCount(peer_certs) == 0 ||
-                    !CFEqual(CFArrayGetValueAtIndex(self_certs, 0), CFArrayGetValueAtIndex(peer_certs, 0))) {
-                    ok = 0;
+                if (peer_certs && CFArrayGetCount(peer_certs) > 0 &&
+                    CFEqual(CFArrayGetValueAtIndex(self_certs, 0), CFArrayGetValueAtIndex(peer_certs, 0))) {
+                    ok = 1;
                 }
             }
             CFRelease(self_info);
@@ -218,9 +219,11 @@ static int peer_signer_matches_self(CFDictionaryRef peer_info) {
 }
 
 static int peer_ok(int fd) {
-    pid_t pid = 0;
-    socklen_t len = sizeof(pid);
-    if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len) != 0 || pid <= 0) return 0;
+    audit_token_t tok;
+    socklen_t len = sizeof(tok);
+    if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERTOKEN, &tok, &len) != 0) return 0;
+    pid_t pid = audit_token_to_pid(tok);
+    if (pid <= 0) return 0;
 
     char raw_path[PROC_PIDPATHINFO_MAXSIZE];
     if (proc_pidpath(pid, raw_path, sizeof(raw_path)) <= 0) return 0;
@@ -236,15 +239,15 @@ static int peer_ok(int fd) {
     if ((st_exe.st_mode & S_IWOTH) != 0) return 0;
 
     int authorized = 0;
-    CFNumberRef pid_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &pid);
-    if (!pid_num) return 0;
-    const void *keys[] = { kSecGuestAttributePid };
-    const void *vals[] = { pid_num };
+    CFDataRef tok_data = CFDataCreate(kCFAllocatorDefault, (const UInt8 *)&tok, sizeof(tok));
+    if (!tok_data) return 0;
+    const void *keys[] = { kSecGuestAttributeAudit };
+    const void *vals[] = { tok_data };
     CFDictionaryRef attrs = CFDictionaryCreate(
         kCFAllocatorDefault, keys, vals, 1,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
     );
-    CFRelease(pid_num);
+    CFRelease(tok_data);
     if (!attrs) return 0;
 
     SecCodeRef guest = NULL;
