@@ -1,11 +1,14 @@
-/* sino-smcwrite — root LaunchDaemon. Whitelist FnMd/FnTg only.
-   ponytail: unix socket + peer path → SMAppService if we Developer-ID sign */
+/* sino-smcwrite — root LaunchDaemon. Whitelist FnMd/FnTg only. */
+#include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
+#include <Security/Security.h>
 #include <copyfile.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libproc.h>
+#include <limits.h>
 #include <mach/mach.h>
+#include <math.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -13,6 +16,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -21,6 +25,9 @@
 #define PLIST "/Library/LaunchDaemons/com.lov3u.sino.smcwrite.plist"
 #define SOCK "/var/run/com.lov3u.sino.smcwrite.sock"
 #define LABEL "com.lov3u.sino.smcwrite"
+#define ALLOWED_APP_DIR "/Applications/Sino.app"
+#define ALLOWED_EXE_PATH "/Applications/Sino.app/Contents/MacOS/Sino"
+#define ALLOWED_BUNDLE_ID "com.lov3u.sino"
 #define MAX_FANS 4
 
 extern char **environ;
@@ -47,7 +54,10 @@ static io_connect_t g_conn;
 static int g_listen = -1;
 
 static UInt32 fourcc(const char *s) {
-    return ((UInt32)s[0] << 24) | ((UInt32)s[1] << 16) | ((UInt32)s[2] << 8) | (UInt32)s[3];
+    return ((UInt32)(unsigned char)s[0] << 24) |
+           ((UInt32)(unsigned char)s[1] << 16) |
+           ((UInt32)(unsigned char)s[2] << 8) |
+           (UInt32)(unsigned char)s[3];
 }
 
 static int smc_call(SMCKeyData *in, SMCKeyData *out) {
@@ -63,12 +73,14 @@ static int smc_read(const char *key, void *buf, int buflen) {
     in.data8 = kSMCReadKeyInfo;
     if (smc_call(&in, &out) != KERN_SUCCESS) return -1;
     UInt32 sz = out.keyInfo.dataSize;
+    if (sz > sizeof(out.bytes)) sz = sizeof(out.bytes);
     in.keyInfo.dataSize = sz;
     in.data8 = kSMCReadBytes;
     memset(&out, 0, sizeof(out));
     if (smc_call(&in, &out) != KERN_SUCCESS) return -1;
     int n = (int)sz;
     if (n > buflen) n = buflen;
+    if (n < 0) n = 0;
     memcpy(buf, out.bytes, (size_t)n);
     return n;
 }
@@ -135,14 +147,15 @@ static void auto_all(void) {
 }
 
 static int set_fan(int i, float rpm) {
+    if (!isfinite(rpm)) return -1;
     int n = fan_count();
     if (i < 0 || i >= n) return -1;
     char k[5];
-    float mn = 2000, mx = 6800, v;
+    float mn = 2000.0f, mx = 6800.0f, v = 0.0f;
     key_for(i, 'M', 'n', k);
-    if (smc_read(k, &v, 4) == 4 && v > 500 && v < 20000) mn = v;
+    if (smc_read(k, &v, 4) == 4 && isfinite(v) && v > 500.0f && v < 20000.0f) mn = v;
     key_for(i, 'M', 'x', k);
-    if (smc_read(k, &v, 4) == 4 && v > mn) mx = v;
+    if (smc_read(k, &v, 4) == 4 && isfinite(v) && v > mn && v < 20000.0f) mx = v;
     if (rpm < mn) rpm = mn;
     if (rpm > mx) rpm = mx;
 
@@ -173,27 +186,95 @@ static int set_fan(int i, float rpm) {
     in.key = fourcc(k);
     in.data8 = kSMCReadKeyInfo;
     if (smc_call(&in, &out) == KERN_SUCCESS && out.keyInfo.dataSize == 2) {
-        uint16_t val = (uint16_t)(rpm * 4.0f);
+        float clamped = rpm > 16383.0f ? 16383.0f : (rpm < 0.0f ? 0.0f : rpm);
+        uint16_t val = (uint16_t)(clamped * 4.0f);
         uint8_t buf[2] = { (uint8_t)(val >> 8), (uint8_t)(val & 0xff) };
         return smc_write(k, buf, 2);
     }
     return smc_write(k, &rpm, 4);
 }
 
+static int peer_signer_matches_self(CFDictionaryRef peer_info) {
+    SecCodeRef self_code = NULL;
+    CFDictionaryRef self_info = NULL;
+    int ok = 1;
+
+    if (SecCodeCopySelf(kSecCSDefaultFlags, &self_code) == errSecSuccess && self_code) {
+        if (SecCodeCopySigningInformation(self_code, kSecCSSigningInformation, &self_info) == errSecSuccess && self_info) {
+            CFArrayRef self_certs = CFDictionaryGetValue(self_info, kSecCodeInfoCertificates);
+            if (self_certs && CFArrayGetCount(self_certs) > 0) {
+                CFArrayRef peer_certs = CFDictionaryGetValue(peer_info, kSecCodeInfoCertificates);
+                if (!peer_certs || CFArrayGetCount(peer_certs) == 0 ||
+                    !CFEqual(CFArrayGetValueAtIndex(self_certs, 0), CFArrayGetValueAtIndex(peer_certs, 0))) {
+                    ok = 0;
+                }
+            }
+            CFRelease(self_info);
+        }
+        CFRelease(self_code);
+    }
+    return ok;
+}
+
 static int peer_ok(int fd) {
     pid_t pid = 0;
     socklen_t len = sizeof(pid);
     if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len) != 0 || pid <= 0) return 0;
-    char path[PROC_PIDPATHINFO_MAXSIZE];
-    if (proc_pidpath(pid, path, sizeof(path)) <= 0) return 0;
-    const char *suf = "/Sino.app/Contents/MacOS/Sino";
-    size_t n = strlen(path), m = strlen(suf);
-    if (n >= m && strcmp(path + n - m, suf) == 0) return 1;
-    const char *suf2 = "/MacOS/Sino";
-    size_t m2 = strlen(suf2);
-    if (n >= m2 && strcmp(path + n - m2, suf2) == 0) return 1;
-    if (n >= 4 && strcmp(path + n - 4, "Sino") == 0) return 1;
-    return 0;
+
+    char raw_path[PROC_PIDPATHINFO_MAXSIZE];
+    if (proc_pidpath(pid, raw_path, sizeof(raw_path)) <= 0) return 0;
+
+    char resolved[PATH_MAX];
+    if (!realpath(raw_path, resolved)) return 0;
+    if (strcmp(resolved, ALLOWED_EXE_PATH) != 0) return 0;
+
+    struct stat st_app, st_exe;
+    if (stat(ALLOWED_APP_DIR, &st_app) != 0 || !S_ISDIR(st_app.st_mode)) return 0;
+    if ((st_app.st_mode & S_IWOTH) != 0) return 0;
+    if (stat(resolved, &st_exe) != 0 || !S_ISREG(st_exe.st_mode)) return 0;
+    if ((st_exe.st_mode & S_IWOTH) != 0) return 0;
+
+    int authorized = 0;
+    CFNumberRef pid_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &pid);
+    if (!pid_num) return 0;
+    const void *keys[] = { kSecGuestAttributePid };
+    const void *vals[] = { pid_num };
+    CFDictionaryRef attrs = CFDictionaryCreate(
+        kCFAllocatorDefault, keys, vals, 1,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
+    );
+    CFRelease(pid_num);
+    if (!attrs) return 0;
+
+    SecCodeRef guest = NULL;
+    if (SecCodeCopyGuestWithAttributes(NULL, attrs, kSecCSDefaultFlags, &guest) == errSecSuccess && guest) {
+        if (SecCodeCheckValidity(guest, kSecCSDefaultFlags, NULL) == errSecSuccess) {
+            CFURLRef code_url = NULL;
+            char code_path[PATH_MAX];
+            if (SecCodeCopyPath(guest, kSecCSDefaultFlags, &code_url) == errSecSuccess && code_url) {
+                if (CFURLGetFileSystemRepresentation(code_url, true, (UInt8 *)code_path, sizeof(code_path))) {
+                    char code_real[PATH_MAX];
+                    if (realpath(code_path, code_real) && strcmp(code_real, ALLOWED_EXE_PATH) == 0) {
+                        CFDictionaryRef info = NULL;
+                        if (SecCodeCopySigningInformation(guest, kSecCSSigningInformation, &info) == errSecSuccess && info) {
+                            CFStringRef ident = CFDictionaryGetValue(info, kSecCodeInfoIdentifier);
+                            if (ident && CFGetTypeID(ident) == CFStringGetTypeID() &&
+                                CFStringCompare(ident, CFSTR(ALLOWED_BUNDLE_ID), 0) == kCFCompareEqualTo) {
+                                if (peer_signer_matches_self(info)) {
+                                    authorized = 1;
+                                }
+                            }
+                            CFRelease(info);
+                        }
+                    }
+                }
+                CFRelease(code_url);
+            }
+        }
+        CFRelease(guest);
+    }
+    CFRelease(attrs);
+    return authorized;
 }
 
 static int reply(int fd, const char *s) {
@@ -202,20 +283,27 @@ static int reply(int fd, const char *s) {
 }
 
 static void handle_client(int fd) {
+    struct timeval rcv_tv = { .tv_sec = 10, .tv_usec = 0 };
+    struct timeval snd_tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
+
     char buf[96];
     int used = 0;
+    int did_override = 0;
     while (1) {
-        ssize_t r = read(fd, buf + used, sizeof(buf) - 1 - used);
+        ssize_t r = read(fd, buf + used, sizeof(buf) - 1 - (size_t)used);
         if (r <= 0) break;
         used += (int)r;
         buf[used] = 0;
         char *nl;
-        while ((nl = memchr(buf, '\n', used))) {
+        while ((nl = memchr(buf, '\n', (size_t)used))) {
             *nl = 0;
             if (strcmp(buf, "PING") == 0) {
                 reply(fd, "OK\n");
             } else if (strcmp(buf, "AUTO") == 0) {
                 auto_all();
+                did_override = 0;
                 reply(fd, "OK\n");
             } else if (strncmp(buf, "AUTO ", 5) == 0) {
                 int fan = -1;
@@ -228,25 +316,33 @@ static void handle_client(int fd) {
                     smc_write(k, &z, 1);
                 } else {
                     auto_all();
+                    did_override = 0;
                 }
                 reply(fd, "OK\n");
             } else if (strncmp(buf, "SET ", 4) == 0) {
                 int fan = -1;
                 float rpm = 0;
-                if (sscanf(buf + 4, "%d %f", &fan, &rpm) != 2 || set_fan(fan, rpm) != 0)
+                if (sscanf(buf + 4, "%d %f", &fan, &rpm) != 2 || set_fan(fan, rpm) != 0) {
                     reply(fd, "ERR\n");
-                else
+                } else {
+                    did_override = 1;
                     reply(fd, "OK\n");
+                }
             } else {
                 reply(fd, "ERR\n");
             }
             int rest = used - (int)(nl + 1 - buf);
-            memmove(buf, nl + 1, rest);
+            memmove(buf, nl + 1, (size_t)rest);
             used = rest;
         }
-        if (used > 80) break;
+        if (used > 80) {
+            reply(fd, "ERR\n");
+            break;
+        }
     }
-    auto_all();
+    if (did_override) {
+        auto_all();
+    }
 }
 
 static void cleanup(int sig) {
@@ -297,8 +393,14 @@ static int do_install(const char *self) {
         perror("plist");
         return 1;
     }
-    (void)!write(fd, plist, strlen(plist));
+    size_t plen = strlen(plist);
+    ssize_t written = write(fd, plist, plen);
     close(fd);
+    if (written != (ssize_t)plen) {
+        perror("plist write");
+        unlink(PLIST);
+        return 1;
+    }
     chown(PLIST, 0, 0);
     chmod(PLIST, 0644);
     char *boot[] = { "/bin/launchctl", "bootstrap", "system", PLIST, NULL };
@@ -338,7 +440,7 @@ int main(int argc, char **argv) {
     strncpy(addr.sun_path, SOCK, sizeof(addr.sun_path) - 1);
     if (bind(g_listen, (struct sockaddr *)&addr, sizeof(addr)) != 0) return 1;
     chmod(SOCK, 0666);
-    if (listen(g_listen, 2) != 0) return 1;
+    if (listen(g_listen, 4) != 0) return 1;
 
     while (1) {
         int fd = accept(g_listen, NULL, NULL);

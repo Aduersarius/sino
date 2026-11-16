@@ -26,7 +26,49 @@ enum { kSMCIndex = 2, kSMCReadKeyInfo = 9, kSMCReadBytes = 5 };
 static io_connect_t g_conn;
 
 static UInt32 fourcc(const char *s) {
-    return ((UInt32)s[0] << 24) | ((UInt32)s[1] << 16) | ((UInt32)s[2] << 8) | (UInt32)s[3];
+    return ((UInt32)(unsigned char)s[0] << 24) |
+           ((UInt32)(unsigned char)s[1] << 16) |
+           ((UInt32)(unsigned char)s[2] << 8) |
+           (UInt32)(unsigned char)s[3];
+}
+
+int sino_smc_decode_float(const unsigned char *raw, int got, uint32_t data_type, float *out) {
+    if (!raw || !out || got <= 0) return -1;
+    if (data_type == fourcc("flt ") || data_type == fourcc("flt\0")) {
+        if (got < 4) return -1;
+        float v = 0;
+        memcpy(&v, raw, 4);
+        *out = v;
+        return 0;
+    }
+    if (data_type == fourcc("fpe2")) {
+        if (got < 2) return -1;
+        uint16_t bits = (uint16_t)(((uint16_t)raw[0] << 8) | raw[1]);
+        *out = (float)bits / 4.0f;
+        return 0;
+    }
+    if (data_type == fourcc("sp78")) {
+        if (got < 2) return -1;
+        int16_t bits = (int16_t)(((uint16_t)raw[0] << 8) | raw[1]);
+        *out = (float)bits / 256.0f;
+        return 0;
+    }
+    if (data_type == fourcc("ui8 ")) {
+        *out = (float)raw[0];
+        return 0;
+    }
+    if (data_type == fourcc("ui16")) {
+        if (got < 2) return -1;
+        *out = (float)(((uint16_t)raw[0] << 8) | raw[1]);
+        return 0;
+    }
+    if (got >= 4) {
+        float v = 0;
+        memcpy(&v, raw, 4);
+        *out = v;
+        return 0;
+    }
+    return -1;
 }
 
 static int smc_call(SMCKeyData *in, SMCKeyData *out) {
@@ -42,6 +84,7 @@ static int smc_read(const char *key, void *buf, int buflen, UInt32 *type_out, UI
     in.data8 = kSMCReadKeyInfo;
     if (smc_call(&in, &out) != KERN_SUCCESS) return -1;
     UInt32 sz = out.keyInfo.dataSize;
+    if (sz > sizeof(out.bytes)) sz = sizeof(out.bytes);
     if (size_out) *size_out = sz;
     if (type_out) *type_out = out.keyInfo.dataType;
     in.keyInfo.dataSize = sz;
@@ -50,8 +93,17 @@ static int smc_read(const char *key, void *buf, int buflen, UInt32 *type_out, UI
     if (smc_call(&in, &out) != KERN_SUCCESS) return -1;
     int n = (int)sz;
     if (n > buflen) n = buflen;
+    if (n < 0) n = 0;
     memcpy(buf, out.bytes, (size_t)n);
     return n;
+}
+
+static int smc_read_float(const char *key, float *out_val) {
+    unsigned char raw[8] = {0};
+    UInt32 type = 0;
+    int got = smc_read(key, raw, (int)sizeof(raw), &type, NULL);
+    if (got <= 0) return -1;
+    return sino_smc_decode_float(raw, got, type, out_val);
 }
 
 int sino_smc_init(void) {
@@ -73,22 +125,20 @@ void sino_smc_shutdown(void) {
 int sino_smc_fans(float *rpm, float *minrpm, float *maxrpm, int cap) {
     if (!g_conn || cap <= 0) return 0;
     unsigned char nbuf = 0;
-    if (smc_read("FNum", &nbuf, 1, NULL, NULL) < 0) return 0;
+    if (smc_read("FNum", &nbuf, 1, NULL, NULL) < 1) return 0;
     int n = nbuf;
     if (n > cap) n = cap;
+    if (n > 9) n = 9;
     for (int i = 0; i < n; i++) {
         char k[5] = { 'F', (char)('0' + i), 'A', 'c', 0 };
         float v = 0;
-        smc_read(k, &v, 4, NULL, NULL);
-        rpm[i] = v;
+        if (rpm) rpm[i] = smc_read_float(k, &v) == 0 ? v : 0.0f;
         k[2] = 'M'; k[3] = 'n';
         v = 0;
-        smc_read(k, &v, 4, NULL, NULL);
-        if (minrpm) minrpm[i] = v > 500 ? v : 2000;
+        if (minrpm) minrpm[i] = (smc_read_float(k, &v) == 0 && v > 500.0f) ? v : 2000.0f;
         k[2] = 'M'; k[3] = 'x';
         v = 0;
-        smc_read(k, &v, 4, NULL, NULL);
-        maxrpm[i] = v > 1 ? v : 8000;
+        if (maxrpm) maxrpm[i] = (smc_read_float(k, &v) == 0 && v > 1.0f) ? v : 8000.0f;
     }
     return n;
 }
@@ -108,19 +158,11 @@ int sino_smc_temps(char *names32, float *celsius, int cap) {
         {"Th0H", "Heatsink"},
         {NULL, NULL}
     };
-    if (!g_conn || cap <= 0) return 0;
+    if (!g_conn || cap <= 0 || !names32 || !celsius) return 0;
     int n = 0;
     for (int i = 0; keys[i].key && n < cap; i++) {
         float v = 0;
-        uint32_t type = 0;
-        unsigned char raw[8] = {0};
-        int got = smc_read(keys[i].key, raw, 8, &type, NULL);
-        if (got < 1) continue;
-        if (type == fourcc("flt ") || type == fourcc("flt")) {
-            memcpy(&v, raw, 4);
-        } else if (got >= 2) {
-            v = ((int16_t)((raw[0] << 8) | raw[1])) / 256.0f;
-        }
+        if (smc_read_float(keys[i].key, &v) != 0) continue;
         if (v < 15 || v > 115) continue;
         snprintf(names32 + n * 32, 32, "%s", keys[i].name);
         celsius[n] = v;
@@ -130,23 +172,23 @@ int sino_smc_temps(char *names32, float *celsius, int cap) {
 }
 
 #include <libproc.h>
-#include <stdio.h>
 #include <sys/resource.h>
 
-int sino_pid_energy_nj(int pid, uint64_t *nanojoules) {
+int sino_pid_rusage(int pid, uint64_t *bytes, uint64_t *nanojoules) {
     struct rusage_info_v6 ru;
     memset(&ru, 0, sizeof(ru));
     if (proc_pid_rusage(pid, RUSAGE_INFO_V6, (rusage_info_t *)&ru) != 0) return -1;
-    *nanojoules = ru.ri_energy_nj;
+    if (bytes) *bytes = ru.ri_phys_footprint ? ru.ri_phys_footprint : ru.ri_resident_size;
+    if (nanojoules) *nanojoules = ru.ri_energy_nj;
     return 0;
 }
 
+int sino_pid_energy_nj(int pid, uint64_t *nanojoules) {
+    return sino_pid_rusage(pid, NULL, nanojoules);
+}
+
 int sino_pid_footprint(int pid, uint64_t *bytes) {
-    struct rusage_info_v6 ru;
-    memset(&ru, 0, sizeof(ru));
-    if (proc_pid_rusage(pid, RUSAGE_INFO_V6, (rusage_info_t *)&ru) != 0) return -1;
-    *bytes = ru.ri_phys_footprint ? ru.ri_phys_footprint : ru.ri_resident_size;
-    return 0;
+    return sino_pid_rusage(pid, bytes, NULL);
 }
 
 #include <sys/socket.h>
@@ -205,8 +247,7 @@ void sino_fan_ctl_close(void) {
 
 int sino_fan_ctl_auto(void) {
     if (g_fan_fd < 0 && sino_fan_ctl_open() != 0) return -1;
-    int rc = fan_xfer("AUTO\n");
-    return rc;
+    return fan_xfer("AUTO\n");
 }
 
 int sino_fan_ctl_set(int fan, float rpm) {
