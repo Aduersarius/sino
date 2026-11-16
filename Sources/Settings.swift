@@ -1258,6 +1258,16 @@ struct SettingsRoot: View {
                     .toggleStyle(.switch)
                 }
                 Divider().padding(.leading, 14)
+                VStack(alignment: .leading, spacing: 6) {
+                    Button("Remove system helpers…") { app.removeSystemHelpers() }
+                    Text("Removes the pmset rule and the fan-control helper. Lid-close prevention and fan control stop working until you turn them on again.")
+                        .font(Chrome.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                Divider().padding(.leading, 14)
                 row("Turn the screen off when the lid closes") {
                     Toggle("", isOn: Binding(
                         get: { prefs.sleepDisplayOnLidClose },

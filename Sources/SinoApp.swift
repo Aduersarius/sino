@@ -402,6 +402,18 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         sino_fan_ctl_close()
     }
 
+    /// Undoes both system changes behind one admin prompt. Uses the bundled helper: an older
+    /// installed one doesn't know --uninstall and would start a second daemon.
+    func removeSystemHelpers() {
+        stopAwake(reason: "remove helpers")
+        releaseFans()
+        // runPrivileged escapes for AppleScript, so the path is quoted exactly as FanCtl.install() quotes it.
+        let cmd = "/usr/bin/pmset -a disablesleep 0; rm -f \(PMSetHelper.sudoersFile) \(PMSetHelper.legacySudoersFile); \"\(FanCtl.bundledHelper)\" --uninstall"
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = PMSetHelper.runPrivileged(cmd)
+        }
+    }
+
     func setFanManual(_ on: Bool) {
         setFanMode(on ? .manual : .auto)
     }
@@ -4875,9 +4887,13 @@ enum FanCtl {
         FileManager.default.fileExists(atPath: "/var/run/com.lov3u.sino.smcwrite.sock")
     }
 
-    static func install() -> Bool {
-        let src = Bundle.main.path(forResource: "sino-smcwrite", ofType: nil)
+    static var bundledHelper: String {
+        Bundle.main.path(forResource: "sino-smcwrite", ofType: nil)
             ?? Bundle.main.bundlePath + "/Contents/Resources/sino-smcwrite"
+    }
+
+    static func install() -> Bool {
+        let src = bundledHelper
         guard FileManager.default.isExecutableFile(atPath: src) || FileManager.default.fileExists(atPath: src) else {
             return false
         }
@@ -4998,7 +5014,7 @@ enum PMSetHelper {
         return runPrivileged(installCommand(body) + " && /usr/bin/pmset -a \(key) \(val)")
     }
 
-    private static func runPrivileged(_ command: String) -> Bool {
+    static func runPrivileged(_ command: String) -> Bool {
         let escaped = command.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         let script = "do shell script \"\(escaped)\" with administrator privileges"
         let proc = Process()
