@@ -424,9 +424,25 @@ static int do_install(const char *self) {
     return 1;
 }
 
+/* bootout sends SIGTERM; the daemon's handler resets fans to auto before exiting. */
+static int do_uninstall(void) {
+    if (geteuid() != 0) {
+        fprintf(stderr, "root required\n");
+        return 1;
+    }
+    char *bootout[] = { "/bin/launchctl", "bootout", "system/" LABEL, NULL };
+    run_cmd(bootout);
+    unlink(PLIST);
+    unlink(DEST);
+    unlink(SOCK);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "--install") == 0)
         return do_install(argv[0]);
+    if (argc >= 2 && strcmp(argv[1], "--uninstall") == 0)
+        return do_uninstall();
 
     io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"));
     if (!svc) return 1;
