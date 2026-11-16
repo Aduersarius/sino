@@ -1,9 +1,9 @@
 class Sino < Formula
   desc "Native macOS menu-bar system monitor"
   homepage "https://github.com/Aduersarius/sino"
-  url "https://github.com/Aduersarius/sino/releases/download/v1.4.4/Sino.app.zip"
-  sha256 "c30754ba8702513ae64955619bd085ddf3f83f9cc77d231caa2c8a4381a50752"
-  version "1.4.4"
+  url "https://github.com/Aduersarius/sino/releases/download/v1.4.5/Sino.app.zip"
+  sha256 "ca63543566c25de80a63a3b6e5aef3f61aa7f3c1a56f2cc23ee222845d35a0cb"
+  version "1.4.5"
   license "MIT"
 
   depends_on macos: :sonoma
@@ -27,7 +27,7 @@ class Sino < Formula
   test do
     assert_path_exists prefix/"Sino.app/Contents/MacOS/Sino"
     assert_predicate prefix/"Sino.app/Contents/MacOS/Sino", :executable?
-    assert_equal "1.4.4",
+    assert_equal "1.4.5",
                  shell_output("/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' " \
                               "#{prefix}/Sino.app/Contents/Info.plist").strip
   end
