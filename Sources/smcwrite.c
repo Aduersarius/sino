@@ -20,6 +20,7 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "SMC.h"
 
 #define DEST "/Library/PrivilegedHelperTools/com.lov3u.sino.smcwrite"
 #define PLIST "/Library/LaunchDaemons/com.lov3u.sino.smcwrite.plist"
@@ -328,6 +329,10 @@ static void handle_client(int fd) {
                     did_override = 1;
                     reply(fd, "OK\n");
                 }
+            } else if (strcmp(buf, "VER") == 0) {
+                char ver[16];
+                snprintf(ver, sizeof(ver), "VER %d\n", SINO_HELPER_VERSION);
+                reply(fd, ver);
             } else {
                 reply(fd, "ERR\n");
             }

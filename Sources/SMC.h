@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#define SINO_HELPER_VERSION 2
 int sino_smc_init(void);
 void sino_smc_shutdown(void);
 int sino_smc_decode_float(const unsigned char *raw, int got, uint32_t data_type, float *out);
@@ -13,3 +14,4 @@ int sino_fan_ctl_open(void);
 void sino_fan_ctl_close(void);
 int sino_fan_ctl_auto(void);
 int sino_fan_ctl_set(int fan, float rpm);
+int sino_fan_ctl_version(void);

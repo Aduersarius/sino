@@ -412,13 +412,15 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             releaseFans()
             return
         }
-        if sino_fan_ctl_open() == 0 {
+        if sino_fan_ctl_open() == 0, sino_fan_ctl_version() >= SINO_HELPER_VERSION {
             armFans(mode)
             return
         }
+        sino_fan_ctl_close()
         fanCtlBusy = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let ok = FanCtl.install() && sino_fan_ctl_open() == 0
+                && sino_fan_ctl_version() >= SINO_HELPER_VERSION
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.fanCtlBusy = false

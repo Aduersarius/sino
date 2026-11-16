@@ -260,3 +260,12 @@ int sino_fan_ctl_set(int fan, float rpm) {
     if (sino_fan_ctl_open() != 0) return -1;
     return fan_xfer(line);
 }
+
+int sino_fan_ctl_version(void) {
+    if (g_fan_fd < 0 && sino_fan_ctl_open() != 0) return 0;
+    if (write(g_fan_fd, "VER\n", 4) != 4) return 0;
+    char buf[16] = {0};
+    if (read(g_fan_fd, buf, 15) <= 0) return 0;
+    int v = 0;
+    return sscanf(buf, "VER %d", &v) == 1 ? v : 0;
+}
