@@ -800,10 +800,13 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
 
     func performUpdate() {
         guard !isUpdating else { return }
-        guard let dl = downloadURL ?? URL(string: "https://github.com/\(Updater.repo)/releases/latest/download/Sino.app.zip") else {
-            openUpdate()
+        guard let dl = downloadURL,
+              UpdateValidator.isTrustedGitHubURL(dl),
+              UpdateValidator.parseSHA256Digest(downloadDigest) != nil else {
+            openUpdate()  // nothing we can verify: let the user download from the release page
             return
         }
+        let digest = downloadDigest  // read on main; the completion handler runs on a background queue
 
         isUpdating = true
         updateProgress = "Downloading update…"
@@ -827,22 +830,29 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
                 return
             }
 
+            let zip = FileManager.default.temporaryDirectory
+                .appendingPathComponent("sino-update-\(UUID().uuidString).zip")
+            guard (try? FileManager.default.moveItem(at: tempURL, to: zip)) != nil,
+                  UpdateValidator.verifyFile(zip, matchesDigest: digest) else {
+                try? FileManager.default.removeItem(at: zip)
+                DispatchQueue.main.async {
+                    self.isUpdating = false
+                    self.updateProgress = nil
+                    self.status = "Update failed verification"
+                }
+                return
+            }
+
             DispatchQueue.main.async {
                 self.updateProgress = "Installing update…"
             }
 
-            let expected = self.downloadDigest ?? ""
             let script = """
             set -e
             DEST="/Applications/Sino.app"
             WORK=$(mktemp -d /tmp/sino_update_XXXXXX)
-            trap 'rm -rf "$WORK"' EXIT
-            cp "\(tempURL.path)" "$WORK/Sino.app.zip"
-            EXPECT="\(expected)"
-            if [ -n "$EXPECT" ]; then
-                GOT=$(shasum -a 256 "$WORK/Sino.app.zip" | cut -d' ' -f1)
-                [ "sha256:$GOT" = "$EXPECT" ] || { echo "checksum mismatch: $GOT" >&2; exit 2; }
-            fi
+            trap 'rm -rf "$WORK"; rm -f "$1"' EXIT
+            cp "$1" "$WORK/Sino.app.zip"
             ditto -x -k "$WORK/Sino.app.zip" "$WORK"
             APP=$(find "$WORK" -maxdepth 2 -name 'Sino.app' | head -1)
             [ -n "$APP" ] || { echo "no app in archive" >&2; exit 3; }
@@ -867,7 +877,7 @@ final class Updater: NSObject, ObservableObject, UNUserNotificationCenterDelegat
             DispatchQueue.global(qos: .userInitiated).async {
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-                proc.arguments = ["-c", script]
+                proc.arguments = ["-c", script, "sino-update", zip.path]
                 try? proc.run()
                 proc.waitUntilExit()
 
