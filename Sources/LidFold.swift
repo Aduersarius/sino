@@ -57,6 +57,7 @@ final class LidFold {
     private var troughAngle: Double = 0
     private var lastAngle: Double = 0
     private var risingAt = Date.distantPast
+    private var wakeObs: NSObjectProtocol?
 
     private var tuning: FoldTuning {
         var t = FoldTuning()
@@ -80,6 +81,10 @@ final class LidFold {
         enabled = true
         armedSeenOpen = false
         loggedWaiting = false
+        lidClosed = false
+        displaySleepApplied = false
+        lowPowerApplied = false
+        lastAngle = 0
         peakAngle = 0
         troughAngle = 999
         risingAt = .distantPast
@@ -93,6 +98,14 @@ final class LidFold {
             DesktopCapture.warm()
             FoldOverlay.prewarm()
             if DesktopCapture.hasBuiltInDisplay { LiveDesktop.shared.start() }
+        }
+        wakeObs = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.enabled, self.nilSince != nil else { return }
+            LidSensor.shared.kick()
         }
         LidSensor.shared.onChange = { [weak self] angle in self?.receive(angle) }
         LidSensor.shared.start()
@@ -110,10 +123,15 @@ final class LidFold {
             lowPowerApplied = false
             App.shared.setLowPowerMode(false)
         }
+        displaySleepApplied = false
         enabled = false
         // Without this the cache outlives the sensor: a stop taken with the lid shut would leave
         // `lidClosed` true forever and block right-click from re-enabling Awake.
         lidClosed = false
+        if let wakeObs {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObs)
+            self.wakeObs = nil
+        }
         LiveDesktop.shared.stop()
         staging = false
         cancelTimers()
@@ -143,8 +161,12 @@ final class LidFold {
             gate.fail()
             if nilSince == nil {
                 nilSince = Date()
-                foldLog("sensor silent at \(Int(shownAngle)) deg, holding the fold")
-                scheduleNilDrop(after: 10)
+                if showing || lidClosed {
+                    foldLog("sensor silent at \(Int(lastAngle > 0 ? lastAngle : shownAngle)) deg, holding the fold")
+                    scheduleNilDrop(after: 10)
+                } else {
+                    foldLog("sensor silent, waiting for reading")
+                }
             }
             return
         }
@@ -357,12 +379,12 @@ final class LidFold {
     private func scheduleNilDrop(after delay: TimeInterval) {
         nilDrop?.cancel()
         let item = DispatchWorkItem { [weak self] in
-            guard let self, self.nilSince != nil else { return }
+            guard let self, self.nilSince != nil, self.showing || self.lidClosed else { return }
             // Awake holds a PreventUserIdleDisplaySleep assertion, so CGDisplayIsAsleep is 0
             // whenever the fold is armed — the lid angle is the honest signal. A sensor that dies
             // with the lid shut is expected and the frame must survive it; one that dies with the
             // lid open leaves a frozen panel over a live desktop, so drop.
-            if self.lastAngle < 30 {
+            if self.lidClosed {
                 self.scheduleNilDrop(after: 5)
                 return
             }

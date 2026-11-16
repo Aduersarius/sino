@@ -31,7 +31,7 @@ final class FoldPreviewModel: ObservableObject {
         // what raises the Screen Recording disclosure, so it is checked only on an explicit tap.
         if sensorAvailable { return }
         let sensor = LidSensor.shared
-        sensor.onChange = { [weak self] reading in
+        sensor.onPreview = { [weak self] reading in
             guard let self else { return }
             self.sensorAvailable = sensor.available
             if let reading { self.sensorAngle = reading }
@@ -40,7 +40,7 @@ final class FoldPreviewModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, !self.followLid else { return }
             self.sensorAvailable = sensor.available
-            sensor.onChange = nil
+            sensor.onPreview = nil
             sensor.stop()
         }
     }
@@ -48,11 +48,11 @@ final class FoldPreviewModel: ObservableObject {
     func syncSensor() {
         let sensor = LidSensor.shared
         guard followLid else {
-            sensor.onChange = nil
+            sensor.onPreview = nil
             sensor.stop()
             return
         }
-        sensor.onChange = { [weak self] reading in
+        sensor.onPreview = { [weak self] reading in
             guard let self else { return }
             self.sensorAvailable = sensor.available
             self.sensorAngle = reading
@@ -62,7 +62,7 @@ final class FoldPreviewModel: ObservableObject {
 
     func shutdown() {
         followLid = false
-        LidSensor.shared.onChange = nil
+        LidSensor.shared.onPreview = nil
         LidSensor.shared.stop()
     }
 }
@@ -193,7 +193,9 @@ struct FoldPreviewCard: View {
                 }
             }
         }
-        .onAppear { model.refresh(); model.syncSensor() }
+        .onAppear {
+            if model.followLid { model.syncSensor() } else { model.refresh() }
+        }
         .onDisappear { model.shutdown() }
         .onChange(of: model.followLid) { _, _ in model.syncSensor() }
     }
