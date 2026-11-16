@@ -14,7 +14,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cc -O2 -o /tmp/sino-smcwrite "$ROOT/Sources/smcwrite.c" \
   -isysroot "$SDK" -target arm64-apple-macos14.0 \
-  -framework IOKit -framework CoreFoundation
+  -framework IOKit -framework CoreFoundation -framework Security
 cp /tmp/sino-smcwrite "$APP/Contents/Resources/sino-smcwrite"
 mkdir -p /tmp/sino_build
 rm -rf /tmp/sino_build/*
@@ -25,7 +25,7 @@ swiftc -parse-as-library -O -module-name Sino \
   -import-objc-header "/tmp/sino_build/Sources/Bridging.h" \
   -framework SwiftUI -framework AppKit -framework IOKit -framework Combine -framework ServiceManagement -framework SystemConfiguration -framework CoreWLAN -framework CoreLocation -framework UserNotifications -framework Carbon -framework Metal -framework MetalKit -framework ScreenCaptureKit \
   -o /tmp/sino_bin \
-  "/tmp/sino_build/Sources/SMC.c" "/tmp/sino_build/Sources/Sampler.swift" "/tmp/sino_build/Sources/SinoApp.swift" "/tmp/sino_build/Sources/Settings.swift" "/tmp/sino_build/Sources/FoldCore.swift" "/tmp/sino_build/Sources/LidSensor.swift" "/tmp/sino_build/Sources/FoldRender.swift" "/tmp/sino_build/Sources/FoldPreview.swift" "/tmp/sino_build/Sources/FoldSurface.swift" "/tmp/sino_build/Sources/DesktopCapture.swift" "/tmp/sino_build/Sources/FoldOverlay.swift" "/tmp/sino_build/Sources/LiveDesktop.swift" "/tmp/sino_build/Sources/LidFold.swift" "/tmp/sino_build/Sources/SkyLightProbe.swift" "/tmp/sino_build/Sources/BlurFold.swift"
+  "/tmp/sino_build/Sources/SMC.c" "/tmp/sino_build/Sources/Sampler.swift" "/tmp/sino_build/Sources/CoreParsers.swift" "/tmp/sino_build/Sources/SinoApp.swift" "/tmp/sino_build/Sources/Settings.swift" "/tmp/sino_build/Sources/FoldCore.swift" "/tmp/sino_build/Sources/LidSensor.swift" "/tmp/sino_build/Sources/FoldRender.swift" "/tmp/sino_build/Sources/FoldPreview.swift" "/tmp/sino_build/Sources/FoldSurface.swift" "/tmp/sino_build/Sources/DesktopCapture.swift" "/tmp/sino_build/Sources/FoldOverlay.swift" "/tmp/sino_build/Sources/LiveDesktop.swift" "/tmp/sino_build/Sources/LidFold.swift" "/tmp/sino_build/Sources/SkyLightProbe.swift" "/tmp/sino_build/Sources/BlurFold.swift"
 mkdir -p "$APP/Contents/MacOS"
 cp /tmp/sino_bin "$BIN"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
