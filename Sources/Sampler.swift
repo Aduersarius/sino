@@ -166,8 +166,10 @@ final class Sampler: ObservableObject {
     private var prevNetAt = Date()
     private var prevNetName = ""
     private var macCache: [String: String] = [:]
+    private var identityCache: [String: (String, NSImage?)] = [:]
     private var prevEnergy: [pid_t: UInt64] = [:]
     private var ticks = 0
+    private var lastProcsMs = 0.0
     private let dumping = CommandLine.arguments.contains("--dump")
     var heavy = false
     private var netInHist = Array(repeating: 0.0, count: 48)
@@ -256,7 +258,9 @@ final class Sampler: ObservableObject {
         sampleFans(&s)
         sampleBattery(&s)
         if heavy || dumping {
+            let t0 = Date()
             sampleProcs(&s)
+            lastProcsMs = Date().timeIntervalSince(t0) * 1000.0
             kickNetTop()
         } else {
             s.processes = []
@@ -279,6 +283,7 @@ final class Sampler: ObservableObject {
             Batt \(Int(s.battCharge*100))% health \(Int(s.battHealth*100))% cycles \(s.battCycles) timeRem \(s.battMinutesRemaining)m charging \(s.charging)
             Procs:
             \(s.processes.map { "  \($0.name) \(Int($0.cpu*1000)/10)%" }.joined(separator: "\n"))
+            procs ms \(Int(lastProcsMs))
             """)
             Darwin.exit(0)
         }
@@ -781,6 +786,7 @@ final class Sampler: ObservableObject {
         netTopBps = 0
         prevProc = [:]
         prevEnergy = [:]
+        identityCache = [:]
         var s = snap
         s.processes = []
         s.memProcesses = []
@@ -1053,7 +1059,18 @@ final class Sampler: ObservableObject {
             let wantMem = foot > 16 * 1024 * 1024 || pid == myPID
             let wantE = hasE && dt > 0.2 && dt < 10.0 && prevEnergy[pid] != nil
             if !wantCPU && !wantMem && !wantE { continue }
-            let (name, icon) = procIdentity(pid)
+            let rawPath = procPath(pid)
+            let identity: (String, NSImage?)
+            if let rawPath, let cached = identityCache[rawPath] {
+                identity = cached
+            } else {
+                let resolved = procIdentity(pid, rawPath: rawPath)
+                if let rawPath {
+                    identityCache[rawPath] = resolved
+                }
+                identity = resolved
+            }
+            let (name, icon) = identity
             if name == "kernel_task" { continue }
             if wantMem {
                 byMem.append((pid, name, icon, foot))
@@ -1144,13 +1161,15 @@ private func canonicalAppName(from rawName: String) -> String {
     return clean
 }
 
-private func procIdentity(_ pid: pid_t) -> (String, NSImage?) {
-    var rawPath: String? = nil
+private func procPath(_ pid: pid_t) -> String? {
     var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-    if proc_pidpath(pid, &path, UInt32(MAXPATHLEN)) > 0 {
-        rawPath = String(cString: path)
-    }
+    guard proc_pidpath(pid, &path, UInt32(MAXPATHLEN)) > 0 else { return nil }
+    let s = String(cString: path)
+    guard !s.isEmpty else { return nil }
+    return s
+}
 
+private func procIdentity(_ pid: pid_t, rawPath: String?) -> (String, NSImage?) {
     if let p = rawPath {
         if p.contains("WebKit.framework") || p.contains("Safari") {
             return ("Safari", NSWorkspace.shared.icon(forFile: "/Applications/Safari.app"))
