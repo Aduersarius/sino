@@ -4967,6 +4967,8 @@ enum PMSetHelper {
     private static func setPmset(_ key: String, _ on: Bool) -> Bool {
         // Test hook: exercises the failure paths without revoking the sudoers rule.
         if ProcessInfo.processInfo.environment["SINO_PMSET_FAIL"] == "1" { return false }
+        let flag = key == "disablesleep" ? "SleepDisabled" : key
+        if pmsetFlag(flag) == on { return true }  // already in the wanted state: no sudo, no prompt
         let val = on ? "1" : "0"
         let sudoProc = Process()
         sudoProc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
