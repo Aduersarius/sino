@@ -348,64 +348,6 @@ final class Sampler: ObservableObject {
         prevTicks = load
     }
 
-    private var cleaningRAM = false
-
-    func cleanRAM(completion: ((Int64) -> Void)? = nil) {
-        guard !cleaningRAM else { return }
-        cleaningRAM = true
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            let hostPort = mach_host_self()
-            var pageSize: vm_size_t = 0
-            host_page_size(hostPort, &pageSize)
-
-            func getFreeBytes() -> (free: UInt64, inactive: UInt64, purgeable: UInt64) {
-                var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
-                var vmStat = vm_statistics64()
-                let ret = withUnsafeMutablePointer(to: &vmStat) {
-                    $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                        host_statistics64(hostPort, HOST_VM_INFO64, $0, &count)
-                    }
-                }
-                guard ret == KERN_SUCCESS else { return (0, 0, 0) }
-                let f = UInt64(vmStat.free_count) * UInt64(pageSize)
-                let inact = UInt64(vmStat.inactive_count) * UInt64(pageSize)
-                let purge = UInt64(vmStat.purgeable_count) * UInt64(pageSize)
-                return (f, inact, purge)
-            }
-
-            let b = getFreeBytes()
-            let reclaimable = b.free + b.inactive + b.purgeable
-            let target = min(3 * 1024 * 1024 * 1024, max(512 * 1024 * 1024, reclaimable / 2))
-
-            var ptr: vm_address_t = 0
-            let ret = vm_allocate(mach_task_self_, &ptr, vm_size_t(target), VM_FLAGS_ANYWHERE)
-            if ret == KERN_SUCCESS {
-                let step = 4096
-                let bound = Int(target)
-                let raw = UnsafeMutablePointer<UInt8>(bitPattern: ptr)!
-                var offset = 0
-                while offset < bound {
-                    raw[offset] = 1
-                    offset += step
-                }
-                usleep(80000)
-                vm_deallocate(mach_task_self_, ptr, vm_size_t(target))
-            }
-
-            let a = getFreeBytes()
-            let freed = max(0, Int64(a.free) - Int64(b.free))
-
-            DispatchQueue.main.async {
-                self.cleaningRAM = false
-                var s = self.snap
-                self.sampleRAM(&s)
-                self.snap = s
-                completion?(freed)
-            }
-        }
-    }
-
     private func sampleRAM(_ s: inout Snapshot) {
         var vm = vm_statistics64()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.stride / MemoryLayout<integer_t>.stride)

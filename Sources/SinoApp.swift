@@ -36,8 +36,6 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var theme: String = UserDefaults.standard.string(forKey: "theme") ?? "system"
     @Published var settingsPage = "general"
     @Published var panel: Panel?
-    @Published var cleaningRAM = false
-    @Published var cleanFeedback: String? = nil
     @Published var lowPowerMode = false
     @Published var lpmBusy = false
     @Published var fetchingIP = false
@@ -935,29 +933,6 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
                 if !running.terminate() { running.forceTerminate() }
             } else {
                 kill(pid, SIGTERM)
-            }
-        }
-    }
-
-    func cleanRAM() {
-        guard !cleaningRAM else { return }
-        cleaningRAM = true
-        cleanFeedback = nil
-        sampler.cleanRAM { freed in
-            self.cleaningRAM = false
-            withAnimation(.easeInOut(duration: 0.2)) {
-                if freed >= 1024 * 1024 * 1024 {
-                    self.cleanFeedback = String(format: "Freed %.2f GB", Double(freed) / (1024 * 1024 * 1024))
-                } else if freed > 0 {
-                    self.cleanFeedback = "Freed \(freed / (1024 * 1024)) MB"
-                } else {
-                    self.cleanFeedback = "Optimized"
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    self.cleanFeedback = nil
-                }
             }
         }
     }
@@ -3015,57 +2990,6 @@ struct Dashboard: View {
                     snap.ramSwapTotal == 0 ? 0 : Double(snap.ramSwapUsed) / Double(snap.ramSwapTotal),
                     pal
                 )
-            } headerTrailing: {
-                HStack(spacing: 5) {
-                    if let fb = app.cleanFeedback {
-                        Text(fb)
-                            .font(.system(size: 8.5, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color.green)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1.5)
-                            .background(Color.green.opacity(0.12), in: Capsule())
-                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                    }
-                    Button {
-                        guard !app.cleaningRAM else { return }
-                        app.cleaningRAM = true
-                        app.cleanFeedback = nil
-                        app.sampler.cleanRAM { freed in
-                            app.cleaningRAM = false
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                if freed >= 1024 * 1024 * 1024 {
-                                    app.cleanFeedback = String(format: "Freed %.2f GB", Double(freed) / (1024 * 1024 * 1024))
-                                } else if freed > 0 {
-                                    app.cleanFeedback = "Freed \(freed / (1024 * 1024)) MB"
-                                } else {
-                                    app.cleanFeedback = "Optimized"
-                                }
-                            }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                                withAnimation(.easeOut(duration: 0.3)) {
-                                    app.cleanFeedback = nil
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 3) {
-                            TimelineView(.animation(minimumInterval: 0.016, paused: !app.cleaningRAM)) { tl in
-                                let angle: Double = app.cleaningRAM ? (tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 0.8) / 0.8) * 360.0 : 0.0
-                                Image(systemName: app.cleaningRAM ? "arrow.triangle.2.circlepath" : "sparkles")
-                                    .font(.system(size: 8.5, weight: .semibold))
-                                    .rotationEffect(.degrees(angle))
-                            }
-                            Text(app.cleaningRAM ? "Cleaning..." : "Clean")
-                                .font(.system(size: 9, weight: .semibold, design: .rounded))
-                        }
-                        .foregroundStyle(app.cleaningRAM ? pal.accent : .secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(pal.track.opacity(0.8), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .overlay { HoverPad(tip: "Quick RAM Clean (evacuate purgeable caches)", radius: 12) }
-                }
             }
         case "procs":
             Card("PROCESSES", "square.grid.2x2", pal, fillHeader: true) {
