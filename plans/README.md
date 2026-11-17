@@ -31,7 +31,7 @@ build links it without `-framework Security` (`Undefined symbols … _SecCodeChe
 | [009](009-closed-state-sampling.md) | Closed-state sampling diet (idle CPU) | P2 | M | 005, 008 | DONE (CPU measurement pending) |
 | [010](010-fan-socket-off-main.md) | Fan socket I/O off main + fix g_fan_fd mutex/framing | P1 | M | — | DONE |
 | [011](011-procs-rusage-and-off-main.md) | Single sino_pid_rusage syscall + scan procs off main | P1 | M | — | DONE |
-| [012](012-remove-clean-ram.md) | Remove fake Clean RAM memory-pressure trick | P2 | S | 010, 011 | TODO |
+| [012](012-remove-clean-ram.md) | Remove fake Clean RAM memory-pressure trick | P2 | S | 010, 011 | DONE |
 | [013](013-idle-cpu-smc-and-cat.md) | Cache SMC key info, skip unused closed reads, sleep cat timer | P1 | M | 010, 011, 012 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
