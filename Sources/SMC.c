@@ -191,28 +191,77 @@ int sino_pid_footprint(int pid, uint64_t *bytes) {
     return sino_pid_rusage(pid, bytes, NULL);
 }
 
+#include <errno.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #define SINO_FAN_SOCK "/var/run/com.lov3u.sino.smcwrite.sock"
+static pthread_mutex_t g_fan_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_fan_fd = -1;
 
-static int fan_xfer(const char *cmd) {
-    if (g_fan_fd < 0) return -1;
-    size_t n = strlen(cmd);
-    if (write(g_fan_fd, cmd, n) != (ssize_t)n) return -1;
-    char r[8] = {0};
-    ssize_t got = read(g_fan_fd, r, 7);
-    return (got >= 3 && r[0] == 'O' && r[1] == 'K') ? 0 : -1;
-}
-
-int sino_fan_ctl_open(void) {
+static void fan_close_locked(void) {
     if (g_fan_fd >= 0) {
-        if (fan_xfer("PING\n") == 0) return 0;
         close(g_fan_fd);
         g_fan_fd = -1;
+    }
+}
+
+static int fan_xfer_locked(const char *cmd, char *reply, size_t rcap) {
+    if (g_fan_fd < 0 || !cmd || !reply || rcap < 2) return -1;
+    char peek;
+    ssize_t pk = recv(g_fan_fd, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (pk == 0 || pk > 0 || (pk < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        fan_close_locked();
+        return -1;
+    }
+    size_t n = strlen(cmd);
+    size_t sent = 0;
+    while (sent < n) {
+        ssize_t w = write(g_fan_fd, cmd + sent, n - sent);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) {
+            fan_close_locked();
+            return -1;
+        }
+        sent += (size_t)w;
+    }
+    size_t used = 0;
+    int found_nl = 0;
+    while (used < rcap - 1) {
+        ssize_t got = read(g_fan_fd, reply + used, (rcap - 1) - used);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) {
+            fan_close_locked();
+            return -1;
+        }
+        if (memchr(reply + used, '\n', (size_t)got) != NULL) {
+            used += (size_t)got;
+            found_nl = 1;
+            break;
+        }
+        used += (size_t)got;
+    }
+    if (!found_nl) {
+        fan_close_locked();
+        return -1;
+    }
+    reply[used] = '\0';
+    return 0;
+}
+
+static int fan_cmd_ok_locked(const char *cmd) {
+    char reply[32];
+    return (fan_xfer_locked(cmd, reply, sizeof(reply)) == 0 &&
+            strncmp(reply, "OK", 2) == 0) ? 0 : -1;
+}
+
+static int fan_open_locked(void) {
+    if (g_fan_fd >= 0) {
+        if (fan_cmd_ok_locked("PING\n") == 0) return 0;
+        fan_close_locked();
     }
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -230,42 +279,62 @@ int sino_fan_ctl_open(void) {
         return -1;
     }
     g_fan_fd = fd;
-    if (fan_xfer("PING\n") != 0) {
-        close(g_fan_fd);
-        g_fan_fd = -1;
+    if (fan_cmd_ok_locked("PING\n") != 0) {
+        fan_close_locked();
         return -1;
     }
     return 0;
 }
 
+static int fan_send_ok_locked(const char *cmd) {
+    if (g_fan_fd < 0 && fan_open_locked() != 0) return -1;
+    if (fan_cmd_ok_locked(cmd) == 0) return 0;
+    fan_close_locked();
+    if (fan_open_locked() != 0) return -1;
+    return fan_cmd_ok_locked(cmd);
+}
+
+int sino_fan_ctl_open(void) {
+    pthread_mutex_lock(&g_fan_lock);
+    int rc = fan_open_locked();
+    pthread_mutex_unlock(&g_fan_lock);
+    return rc;
+}
+
 void sino_fan_ctl_close(void) {
-    if (g_fan_fd >= 0) {
-        close(g_fan_fd);
-        g_fan_fd = -1;
-    }
+    pthread_mutex_lock(&g_fan_lock);
+    fan_close_locked();
+    pthread_mutex_unlock(&g_fan_lock);
 }
 
 int sino_fan_ctl_auto(void) {
-    if (g_fan_fd < 0 && sino_fan_ctl_open() != 0) return -1;
-    return fan_xfer("AUTO\n");
+    pthread_mutex_lock(&g_fan_lock);
+    int rc = fan_send_ok_locked("AUTO\n");
+    pthread_mutex_unlock(&g_fan_lock);
+    return rc;
 }
 
 int sino_fan_ctl_set(int fan, float rpm) {
-    if (g_fan_fd < 0 && sino_fan_ctl_open() != 0) return -1;
     char line[64];
     snprintf(line, sizeof(line), "SET %d %.0f\n", fan, rpm);
-    if (fan_xfer(line) == 0) return 0;
-    close(g_fan_fd);
-    g_fan_fd = -1;
-    if (sino_fan_ctl_open() != 0) return -1;
-    return fan_xfer(line);
+    pthread_mutex_lock(&g_fan_lock);
+    int rc = fan_send_ok_locked(line);
+    pthread_mutex_unlock(&g_fan_lock);
+    return rc;
 }
 
 int sino_fan_ctl_version(void) {
-    if (g_fan_fd < 0 && sino_fan_ctl_open() != 0) return 0;
-    if (write(g_fan_fd, "VER\n", 4) != 4) return 0;
-    char buf[16] = {0};
-    if (read(g_fan_fd, buf, 15) <= 0) return 0;
+    pthread_mutex_lock(&g_fan_lock);
     int v = 0;
-    return sscanf(buf, "VER %d", &v) == 1 ? v : 0;
+    if (g_fan_fd >= 0 || fan_open_locked() == 0) {
+        char buf[32];
+        if (fan_xfer_locked("VER\n", buf, sizeof(buf)) == 0) {
+            int parsed = 0;
+            if (sscanf(buf, "VER %d", &parsed) == 1) {
+                v = parsed;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_fan_lock);
+    return v;
 }
