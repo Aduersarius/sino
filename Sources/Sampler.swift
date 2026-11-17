@@ -430,14 +430,24 @@ final class Sampler: ObservableObject {
         var svc = IOIteratorNext(it)
         while svc != 0 {
             defer { IOObjectRelease(svc); svc = IOIteratorNext(it) }
-            guard let dict = copyProps(svc) else { continue }
-            if let cached = gpuNameCached { s.gpuName = cached }
-            else if let model = dict["model"] as? String { s.gpuName = model; gpuNameCached = model }
-            if let cached = gpuCoresCached { s.gpuCores = cached }
-            else if let n = dict["gpu-core-count"] as? NSNumber { s.gpuCores = n.intValue; gpuCoresCached = n.intValue }
-            if let cached = gpuVendorCached { s.gpuVendor = cached }
-            else { let v = pciVendor(dict); s.gpuVendor = v; gpuVendorCached = v }
-            guard let stats = dict["PerformanceStatistics"] as? [String: Any] else { continue }
+            let stats: [String: Any]
+            if let name = gpuNameCached, let cores = gpuCoresCached, let vendor = gpuVendorCached {
+                s.gpuName = name
+                s.gpuCores = cores
+                s.gpuVendor = vendor
+                guard let raw = IORegistryEntryCreateCFProperty(svc, "PerformanceStatistics" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any] else { continue }
+                stats = raw
+            } else {
+                guard let dict = copyProps(svc) else { continue }
+                if let cached = gpuNameCached { s.gpuName = cached }
+                else if let model = dict["model"] as? String { s.gpuName = model; gpuNameCached = model }
+                if let cached = gpuCoresCached { s.gpuCores = cached }
+                else if let n = dict["gpu-core-count"] as? NSNumber { s.gpuCores = n.intValue; gpuCoresCached = n.intValue }
+                if let cached = gpuVendorCached { s.gpuVendor = cached }
+                else { let v = pciVendor(dict); s.gpuVendor = v; gpuVendorCached = v }
+                guard let raw = dict["PerformanceStatistics"] as? [String: Any] else { continue }
+                stats = raw
+            }
             if let u = stats["Device Utilization %"] as? NSNumber { s.gpuUsage = u.doubleValue / 100 }
             if let u = stats["Renderer Utilization %"] as? NSNumber { s.gpuRenderer = u.doubleValue / 100 }
             if let u = stats["Tiler Utilization %"] as? NSNumber { s.gpuTiler = u.doubleValue / 100 }
