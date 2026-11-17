@@ -29,6 +29,10 @@ build links it without `-framework Security` (`Undefined symbols … _SecCodeChe
 | [007](007-uninstall-and-scope-privileges.md) | User-scoped pmset rule, no needless prompts, uninstall | P2 | M | 006 | DONE (live check pending) |
 | [008](008-proc-identity-cache.md) | Cache process names/icons by path | P2 | S–M | (after 005) | DONE (timings pending) |
 | [009](009-closed-state-sampling.md) | Closed-state sampling diet (idle CPU) | P2 | M | 005, 008 | DONE (CPU measurement pending) |
+| [010](010-fan-socket-off-main.md) | Fan socket I/O off main + fix g_fan_fd mutex/framing | P1 | M | — | TODO |
+| [011](011-procs-rusage-and-off-main.md) | Single sino_pid_rusage syscall + scan procs off main | P1 | M | — | TODO |
+| [012](012-remove-clean-ram.md) | Remove fake Clean RAM memory-pressure trick | P2 | S | 010, 011 | TODO |
+| [013](013-idle-cpu-smc-and-cat.md) | Cache SMC key info, skip unused closed reads, sleep cat timer | P1 | M | 010, 011, 012 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
 
@@ -38,6 +42,8 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
 - 001 before 006: 006 extends the helper's `cc` line that 001 fixes.
 - 006 before 007: both edit `smcwrite.c` (`main` dispatch); 007's uninstall also relies on the bundled helper being current.
 - 005 → 008 → 009: all edit `Sources/Sampler.swift`; 009 also assumes 005 already stopped closed-state network fetches.
+- 010 & 011 touch disjoint files (`SMC.c`+`SinoApp.swift` vs `Sampler.swift`) and run in parallel.
+- 012 follows 010/011 (same files); 013 follows 010/011/012 (`SMC.c`, `Sampler.swift`, `SinoApp.swift`, `CoreParsers.swift`).
 - 004 is independent.
 - Plans that need `./build.sh` for a live check say so: it **replaces `/Applications/Sino.app`**, so executors run it only with operator approval.
 
@@ -46,7 +52,7 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
 - Log file `~/Library/Logs/Sino-fold.log` grows without rotation: rejected — 13 KB after weeks of use.
 - `nettop` pipe deadlock: low risk — measured output 4.9 KB, well under the 64 KB pipe buffer. The missing timeout is deferred.
 - NSAllowsArbitraryLoads in Info.plist: every URL is https — trivial cleanup, not planned.
-- Deferred (selected for audit, not for plans): main-thread fan socket I/O plus `g_fan_fd` race, "Clean RAM" fake metric,
-  M1-only SMC temperature keys, stale-SSID fallback, the blocking `pmset -g` on dropdown open, stale Makefile, missing CI.
+- `tests.sh` uses a fixed `/tmp/sino_tests` directory, causing occasional collisions when concurrent runs compile tests simultaneously.
+- Deferred (selected for audit, not for plans): M1-only SMC temperature keys, stale-SSID fallback, blocking `pmset -g` on dropdown open, stale Makefile, missing CI, leaked window-close observers.
 - Checked and clean: host_processor_info deallocation, IOKit object releases, 64-bit net counters with wrap guards,
   helper key whitelist and RPM clamp, event-monitor cleanup, migration of `pulse.*` defaults.
