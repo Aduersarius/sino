@@ -359,11 +359,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         let on = prefs.bar.contains("cat")
         if on {
             guard catTimer == nil else { return }
-            let t = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
-                self?.tickCat()
-            }
-            RunLoop.main.add(t, forMode: .common)
-            catTimer = t
+            scheduleCatTick()
         } else {
             catTimer?.invalidate()
             catTimer = nil
@@ -371,16 +367,31 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
-    func tickCat() {
-        extra.catTick += 1
+    private func scheduleCatTick() {
+        catTimer?.invalidate()
+        let step = CatAnim.ticksUntilChange(from: extra.catTick)
+        let delay = CatAnim.tickInterval * Double(step)
+        let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            self?.tickCat(step: step)
+        }
+        t.tolerance = min(0.05, delay * 0.15)
+        RunLoop.main.add(t, forMode: .common)
+        catTimer = t
+    }
+
+    func tickCat(step: Int) {
+        catTimer = nil
+        guard prefs.bar.contains("cat") else { return }
+        extra.catTick = (extra.catTick + step) % CatAnim.cycleLength
         // Redraw only when the pose changes; the image is otherwise identical (and costly to rasterize).
         if let button = item?.button, extra.catFrame != lastCatFrame {
             lastCatFrame = extra.catFrame
             button.effectiveAppearance.performAsCurrentDrawingAppearance {
                 button.image = extra.makeImage()
             }
+            if dropOpen { holdHighlight() }
         }
-        if dropOpen { holdHighlight() }
+        scheduleCatTick()
     }
 
     func holdHighlight() {
@@ -1531,40 +1542,7 @@ final class ExtraView: NSView {
     // ponytail: 22×22 @ 1pt orange sitting tabby. No shadow.
     var catFrame: Int {
         guard catAnimated else { return 0 }
-        let t = catTick % 1000
-        if t < 495 {
-            let sub = t % 125
-            if (10...12).contains(sub) { return 1 }
-            if (22...28).contains(sub) {
-                return (23...26).contains(sub) ? 8 : 7
-            }
-            if (38...53).contains(sub) {
-                switch sub - 38 {
-                case 0, 1, 12, 13: return 2
-                case 4, 5, 8, 9:   return 10
-                case 6, 7:         return 11
-                default:           return 0
-                }
-            }
-            if (60...72).contains(sub) {
-                switch sub {
-                case 60, 61, 72: return 5
-                case 62...65, 70, 71: return 6
-                case 66...69: return 9
-                default: return 0
-                }
-            }
-            return 0
-        }
-        if t < 500 { return 16 }
-        if t < 995 {
-            let sleepSub = (t - 500) % 60
-            if sleepSub < 36 { return 17 }
-            if (36..<44).contains(sleepSub) { return 18 }
-            if (44..<52).contains(sleepSub) { return 19 }
-            return 18
-        }
-        return 16
+        return CatAnim.frame(at: catTick)
     }
 
     private static let catIdle = [
@@ -2020,6 +1998,37 @@ final class ExtraView: NSView {
         }
     }
 
+    private static let catPalette: [Character: NSColor] = [
+        "K": NSColor(srgbRed: 0.14, green: 0.13, blue: 0.17, alpha: 1),
+        "O": NSColor(srgbRed: 0.97, green: 0.58, blue: 0.19, alpha: 1),
+        "D": NSColor(srgbRed: 0.85, green: 0.41, blue: 0.14, alpha: 1),
+        "L": NSColor(srgbRed: 0.98, green: 0.73, blue: 0.41, alpha: 1),
+        "T": NSColor(srgbRed: 0.93, green: 0.33, blue: 0.39, alpha: 1)
+    ]
+    private static var catSpriteCache: [Int: NSImage] = [:]
+
+    private static func catSpriteImage(for frame: Int, rows: [String]) -> NSImage {
+        if let cached = catSpriteCache[frame] { return cached }
+        guard !rows.isEmpty else { return NSImage() }
+        let cols = rows.map(\.count).max() ?? 0
+        guard cols > 0 else { return NSImage() }
+        let img = NSImage(size: NSSize(width: cols, height: rows.count))
+        img.lockFocusFlipped(true)
+        defer { img.unlockFocus() }
+        NSGraphicsContext.current?.imageInterpolation = .none
+        NSColor.clear.set()
+        NSRect(origin: .zero, size: img.size).fill(using: .copy)
+        for (j, row) in rows.enumerated() {
+            for (i, ch) in row.enumerated() {
+                guard let color = catPalette[ch] else { continue }
+                color.setFill()
+                NSRect(x: i, y: j, width: 1, height: 1).fill()
+            }
+        }
+        catSpriteCache[frame] = img
+        return img
+    }
+
     private func drawCat(_ r: NSRect) {
         let sprite = currentCatSprite()
         let rows = CGFloat(sprite.count)
@@ -2028,21 +2037,16 @@ final class ExtraView: NSView {
         let s = min(maxH / rows, (r.width - 2) / cols)
         let ox = (r.minX + (r.width - cols * s) / 2).rounded()
         let oy = (r.minY + (r.height - rows * s) / 2).rounded()
-        let outline = NSColor(srgbRed: 0.14, green: 0.13, blue: 0.17, alpha: 1)
-        let orange = NSColor(srgbRed: 0.97, green: 0.58, blue: 0.19, alpha: 1)
-        let dark = NSColor(srgbRed: 0.85, green: 0.41, blue: 0.14, alpha: 1)
-        let light = NSColor(srgbRed: 0.98, green: 0.73, blue: 0.41, alpha: 1)
-        let tongue = NSColor(srgbRed: 0.93, green: 0.33, blue: 0.39, alpha: 1)
-        let map: [Character: NSColor] = [
-            "K": outline, "O": orange, "D": dark, "L": light, "T": tongue
-        ]
-        for (j, row) in sprite.enumerated() {
-            for (i, ch) in row.enumerated() {
-                guard let color = map[ch] else { continue }
-                color.setFill()
-                NSRect(x: ox + CGFloat(i) * s, y: oy + CGFloat(j) * s, width: s, height: s).fill()
-            }
-        }
+        let img = Self.catSpriteImage(for: catFrame, rows: sprite)
+        guard img.size.width > 0, img.size.height > 0 else { return }
+        img.draw(
+            in: NSRect(x: ox, y: oy, width: img.size.width * s, height: rows * s),
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1,
+            respectFlipped: true,
+            hints: nil
+        )
     }
 
     private func drawBolt(_ box: NSRect, color: NSColor) {

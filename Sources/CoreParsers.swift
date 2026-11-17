@@ -321,3 +321,56 @@ enum UpdateValidator {
         return actual == expected
     }
 }
+
+/// Pure menu-bar cat animation schedule, decoupled from AppKit for unit testing and event-driven scheduling.
+enum CatAnim {
+    static let cycleLength = 1000
+    static let tickInterval: TimeInterval = 0.12
+
+    static func frame(at tick: Int) -> Int {
+        let t = (tick % cycleLength + cycleLength) % cycleLength
+        if t < 495 {
+            let sub = t % 125
+            if (10...12).contains(sub) { return 1 }
+            if (22...28).contains(sub) {
+                return (23...26).contains(sub) ? 8 : 7
+            }
+            if (38...53).contains(sub) {
+                switch sub - 38 {
+                case 0, 1, 12, 13: return 2
+                case 4, 5, 8, 9:   return 10
+                case 6, 7:         return 11
+                default:           return 0
+                }
+            }
+            if (60...72).contains(sub) {
+                switch sub {
+                case 60, 61, 72: return 5
+                case 62...65, 70, 71: return 6
+                case 66...69: return 9
+                default: return 0
+                }
+            }
+            return 0
+        }
+        if t < 500 { return 16 }
+        if t < 995 {
+            let sleepSub = (t - 500) % 60
+            if sleepSub < 36 { return 17 }
+            if (36..<44).contains(sleepSub) { return 18 }
+            if (44..<52).contains(sleepSub) { return 19 }
+            return 18
+        }
+        return 16
+    }
+
+    static func ticksUntilChange(from tick: Int) -> Int {
+        let current = frame(at: tick)
+        for d in 1...cycleLength {
+            if frame(at: tick + d) != current {
+                return d
+            }
+        }
+        return cycleLength
+    }
+}

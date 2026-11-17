@@ -74,6 +74,24 @@ struct CoreParsersTests {
         check(!PMSetParser.isValidPosixUsername(""), "empty user name is invalid")
         check(!PMSetParser.isValidPosixUsername(String(repeating: "a", count: 65)), "65-char user name is invalid")
 
+        // CatAnim: frame and ticksUntilChange
+        let expectedPoses: [(Int, Int)] = [
+            (0, 0), (10, 1), (23, 8), (38, 2), (42, 10), (66, 9),
+            (495, 16), (500, 17), (536, 18), (544, 19), (995, 16),
+        ]
+        for (tick, expectedFrame) in expectedPoses {
+            check(CatAnim.frame(at: tick) == expectedFrame, "CatAnim.frame(at: \(tick)) == \(expectedFrame)")
+        }
+        for t in 0..<CatAnim.cycleLength {
+            let d = CatAnim.ticksUntilChange(from: t)
+            let cur = CatAnim.frame(at: t)
+            check(d >= 1 && d <= CatAnim.cycleLength, "ticksUntilChange(\(t)) in 1...1000")
+            check(CatAnim.frame(at: t + d) != cur, "frame changes after d=\(d) from t=\(t)")
+            for k in 1..<d {
+                check(CatAnim.frame(at: t + k) == cur, "frame constant for k=\(k) < d=\(d) from t=\(t)")
+            }
+        }
+
         if failures == 0 {
             print("core parsers: all checks passed")
         } else {
