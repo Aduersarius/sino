@@ -71,26 +71,78 @@ int sino_smc_decode_float(const unsigned char *raw, int got, uint32_t data_type,
     return -1;
 }
 
+enum { SMC_CACHE_CAP = 64 };
+typedef struct {
+    UInt32 key;
+    UInt32 dataSize;
+    UInt32 dataType;
+    int8_t state; /* 0 = unprobed, 1 = valid, -1 = missing */
+} SMCCacheEntry;
+static SMCCacheEntry g_smc_cache[SMC_CACHE_CAP];
+static int g_smc_cache_count = 0;
+static int g_fan_count = -1;
+static float g_fan_min[9];
+static float g_fan_max[9];
+
 static int smc_call(SMCKeyData *in, SMCKeyData *out) {
     size_t outsz = sizeof(*out);
     return IOConnectCallStructMethod(g_conn, kSMCIndex, in, sizeof(*in), out, &outsz);
 }
 
 static int smc_read(const char *key, void *buf, int buflen, UInt32 *type_out, UInt32 *size_out) {
+    if (!g_conn) return -1;
+    UInt32 k = fourcc(key);
+    SMCCacheEntry *entry = NULL;
+    for (int i = 0; i < g_smc_cache_count; i++) {
+        if (g_smc_cache[i].key == k) {
+            entry = &g_smc_cache[i];
+            break;
+        }
+    }
+    if (entry && entry->state == -1) return -1;
+
     SMCKeyData in, out;
+    UInt32 sz = 0;
+    UInt32 type = 0;
+    if (!entry || entry->state == 0) {
+        memset(&in, 0, sizeof(in));
+        memset(&out, 0, sizeof(out));
+        in.key = k;
+        in.data8 = kSMCReadKeyInfo;
+        if (smc_call(&in, &out) != KERN_SUCCESS || out.result != 0 || out.keyInfo.dataSize == 0) {
+            if (!entry && g_smc_cache_count < SMC_CACHE_CAP) {
+                entry = &g_smc_cache[g_smc_cache_count++];
+                entry->key = k;
+            }
+            if (entry) entry->state = -1;
+            return -1;
+        }
+        sz = out.keyInfo.dataSize;
+        if (sz > sizeof(out.bytes)) sz = sizeof(out.bytes);
+        type = out.keyInfo.dataType;
+        if (!entry && g_smc_cache_count < SMC_CACHE_CAP) {
+            entry = &g_smc_cache[g_smc_cache_count++];
+            entry->key = k;
+        }
+        if (entry) {
+            entry->dataSize = sz;
+            entry->dataType = type;
+            entry->state = 1;
+        }
+    } else {
+        sz = entry->dataSize;
+        if (sz > sizeof(out.bytes)) sz = sizeof(out.bytes);
+        type = entry->dataType;
+    }
+    if (size_out) *size_out = sz;
+    if (type_out) *type_out = type;
+
     memset(&in, 0, sizeof(in));
     memset(&out, 0, sizeof(out));
-    in.key = fourcc(key);
-    in.data8 = kSMCReadKeyInfo;
-    if (smc_call(&in, &out) != KERN_SUCCESS) return -1;
-    UInt32 sz = out.keyInfo.dataSize;
-    if (sz > sizeof(out.bytes)) sz = sizeof(out.bytes);
-    if (size_out) *size_out = sz;
-    if (type_out) *type_out = out.keyInfo.dataType;
+    in.key = k;
     in.keyInfo.dataSize = sz;
     in.data8 = kSMCReadBytes;
-    memset(&out, 0, sizeof(out));
-    if (smc_call(&in, &out) != KERN_SUCCESS) return -1;
+    if (smc_call(&in, &out) != KERN_SUCCESS || out.result != 0) return -1;
     int n = (int)sz;
     if (n > buflen) n = buflen;
     if (n < 0) n = 0;
@@ -120,25 +172,40 @@ void sino_smc_shutdown(void) {
         IOServiceClose(g_conn);
         g_conn = 0;
     }
+    memset(g_smc_cache, 0, sizeof(g_smc_cache));
+    g_smc_cache_count = 0;
+    g_fan_count = -1;
+    memset(g_fan_min, 0, sizeof(g_fan_min));
+    memset(g_fan_max, 0, sizeof(g_fan_max));
 }
 
 int sino_smc_fans(float *rpm, float *minrpm, float *maxrpm, int cap) {
     if (!g_conn || cap <= 0) return 0;
-    unsigned char nbuf = 0;
-    if (smc_read("FNum", &nbuf, 1, NULL, NULL) < 1) return 0;
-    int n = nbuf;
+    if (g_fan_count < 0) {
+        unsigned char nbuf = 0;
+        if (smc_read("FNum", &nbuf, 1, NULL, NULL) < 1) return 0;
+        int total = nbuf;
+        if (total > 9) total = 9;
+        for (int i = 0; i < total; i++) {
+            char k[5] = { 'F', (char)('0' + i), 'M', 'n', 0 };
+            float v = 0;
+            g_fan_min[i] = (smc_read_float(k, &v) == 0 && v > 500.0f) ? v : 2000.0f;
+            k[2] = 'M'; k[3] = 'x';
+            v = 0;
+            g_fan_max[i] = (smc_read_float(k, &v) == 0 && v > 1.0f) ? v : 8000.0f;
+        }
+        g_fan_count = total;
+    }
+    int n = g_fan_count;
     if (n > cap) n = cap;
-    if (n > 9) n = 9;
     for (int i = 0; i < n; i++) {
-        char k[5] = { 'F', (char)('0' + i), 'A', 'c', 0 };
-        float v = 0;
-        if (rpm) rpm[i] = smc_read_float(k, &v) == 0 ? v : 0.0f;
-        k[2] = 'M'; k[3] = 'n';
-        v = 0;
-        if (minrpm) minrpm[i] = (smc_read_float(k, &v) == 0 && v > 500.0f) ? v : 2000.0f;
-        k[2] = 'M'; k[3] = 'x';
-        v = 0;
-        if (maxrpm) maxrpm[i] = (smc_read_float(k, &v) == 0 && v > 1.0f) ? v : 8000.0f;
+        if (rpm) {
+            char k[5] = { 'F', (char)('0' + i), 'A', 'c', 0 };
+            float v = 0;
+            rpm[i] = smc_read_float(k, &v) == 0 ? v : 0.0f;
+        }
+        if (minrpm) minrpm[i] = g_fan_min[i];
+        if (maxrpm) maxrpm[i] = g_fan_max[i];
     }
     return n;
 }
