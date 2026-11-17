@@ -54,6 +54,9 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var fanTargets: [Int: Double] = [:]
     @Published var fanCtlBusy = false
     private var fanHold: Timer?
+    private let fanQueue = DispatchQueue(label: "com.lov3u.sino.fanctl", qos: .userInitiated)
+    private var fanGen: UInt64 = 0
+    private var fanReassertInFlight = false
     private var awakeAssertionID: IOPMAssertionID = 0
     private var awakeTimer: Timer? = nil
     enum Panel: String, Equatable, CaseIterable { case cpu, ram, storage, net, fans, battery, gpu }
@@ -196,7 +199,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             // Quitting must hand the lid back: `disablesleep` outlives the process otherwise.
             self?.stopAwake(resetPMSet: true, sync: true, keepPersisted: true, reason: "terminate",
                             forceReset: true)
-            self?.releaseFans()
+            self?.releaseFans(sync: true)
         }
         syncLidFold()
         if prefs.awakeActive {
@@ -393,13 +396,22 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
-    func releaseFans() {
+    func releaseFans(sync: Bool = false) {
+        fanGen &+= 1
         fanHold?.invalidate()
         fanHold = nil
         fanMode = .auto
         fanTargets = [:]
-        sino_fan_ctl_auto()
-        sino_fan_ctl_close()
+        fanReassertInFlight = false
+        let work = {
+            _ = sino_fan_ctl_auto()
+            sino_fan_ctl_close()
+        }
+        if sync {
+            fanQueue.sync(execute: work)
+        } else {
+            fanQueue.async(execute: work)
+        }
     }
 
     /// Undoes both system changes behind one admin prompt. Uses the bundled helper: an older
@@ -424,19 +436,20 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
             releaseFans()
             return
         }
-        if sino_fan_ctl_open() == 0, sino_fan_ctl_version() >= SINO_HELPER_VERSION {
-            armFans(mode)
-            return
-        }
-        sino_fan_ctl_close()
+        fanGen &+= 1
+        let gen = fanGen
         fanCtlBusy = true
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let ok = FanCtl.install() && sino_fan_ctl_open() == 0
-                && sino_fan_ctl_version() >= SINO_HELPER_VERSION
+        fanQueue.async { [weak self] in
+            var ok = sino_fan_ctl_open() == 0 && sino_fan_ctl_version() >= SINO_HELPER_VERSION
+            if !ok {
+                sino_fan_ctl_close()
+                ok = FanCtl.install() && sino_fan_ctl_open() == 0
+                    && sino_fan_ctl_version() >= SINO_HELPER_VERSION
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.fanCtlBusy = false
-                if ok { self.armFans(mode) }
+                if self.fanGen == gen && ok { self.armFans(mode) }
             }
         }
     }
@@ -459,7 +472,9 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     func setFanTarget(_ id: Int, _ rpm: Double) {
         guard fanMode == .manual else { return }
         fanTargets[id] = rpm
-        _ = sino_fan_ctl_set(Int32(id), Float(rpm))
+        fanQueue.async {
+            _ = sino_fan_ctl_set(Int32(id), Float(rpm))
+        }
     }
 
     func hottestTemp() -> Double {
@@ -471,17 +486,27 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func reassertFans() {
+        guard !fanReassertInFlight else { return }
+        let pairs: [(Int, Double)]
         switch fanMode {
         case .auto: return
         case .manual:
-            for (id, rpm) in fanTargets {
-                if sino_fan_ctl_set(Int32(id), Float(rpm)) != 0 { break }
-            }
+            pairs = fanTargets.map { ($0.key, $0.value) }
         case .curve:
             let rpm = curveTarget()
-            for f in sampler.snap.fans {
+            pairs = sampler.snap.fans.map { f in
                 fanTargets[f.id] = rpm
-                if sino_fan_ctl_set(Int32(f.id), Float(rpm)) != 0 { break }
+                return (f.id, rpm)
+            }
+        }
+        guard !pairs.isEmpty else { return }
+        fanReassertInFlight = true
+        fanQueue.async { [weak self] in
+            for (id, rpm) in pairs {
+                if sino_fan_ctl_set(Int32(id), Float(rpm)) != 0 { break }
+            }
+            DispatchQueue.main.async {
+                self?.fanReassertInFlight = false
             }
         }
     }
