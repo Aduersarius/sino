@@ -26,8 +26,8 @@ build links it without `-framework Security` (`Undefined symbols … _SecCodeChe
 | [004](004-install-fallback.md) | install.sh source fallback leaves an installed app | P2 | S | — | DONE |
 | [005](005-public-ip-backoff.md) | Public-IP lookup only while open, throttles failures | P1 | S | — | DONE |
 | [006](006-fan-helper-auth.md) | Fan helper upgrades itself, audit-token auth, fails closed | P1 | M | 001 | DONE (live check pending) |
-| [007](007-uninstall-and-scope-privileges.md) | User-scoped pmset rule, no needless prompts, uninstall | P2 | M | 006 | TODO |
-| [008](008-proc-identity-cache.md) | Cache process names/icons by path | P2 | S–M | (after 005) | TODO |
+| [007](007-uninstall-and-scope-privileges.md) | User-scoped pmset rule, no needless prompts, uninstall | P2 | M | 006 | DONE (live check pending) |
+| [008](008-proc-identity-cache.md) | Cache process names/icons by path | P2 | S–M | (after 005) | DONE (timings pending) |
 | [009](009-closed-state-sampling.md) | Closed-state sampling diet (idle CPU) | P2 | M | 005, 008 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
