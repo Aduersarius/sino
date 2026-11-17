@@ -644,67 +644,69 @@ final class Sampler: ObservableObject {
         }
         s.netInterface = iface.name
         s.wifi = iface.wifi || iface.name == "en0"
-        s.netSSID = s.wifi ? (currentSSID(bsd: iface.name) ?? "—") : "—"
-        s.netName = s.wifi ? (s.netSSID == "—" ? "Wi-Fi" : s.netSSID) : "Ethernet"
-        if s.wifi {
-            let client = CWWiFiClient.shared()
-            let wifi = client.interface(withName: iface.name) ?? client.interface()
-            s.netRSSI = wifi?.rssiValue() ?? 0
-            s.netNoise = wifi?.noiseMeasurement() ?? 0
-            s.netTxRate = wifi?.transmitRate() ?? 0.0
+        if heavy || dumping {
+            s.netSSID = s.wifi ? (currentSSID(bsd: iface.name) ?? "—") : "—"
+            s.netName = s.wifi ? (s.netSSID == "—" ? "Wi-Fi" : s.netSSID) : "Ethernet"
+            if s.wifi {
+                let client = CWWiFiClient.shared()
+                let wifi = client.interface(withName: iface.name) ?? client.interface()
+                s.netRSSI = wifi?.rssiValue() ?? 0
+                s.netNoise = wifi?.noiseMeasurement() ?? 0
+                s.netTxRate = wifi?.transmitRate() ?? 0.0
 
-            var channelNum = 0
-            if let ch = wifi?.wlanChannel() {
-                channelNum = ch.channelNumber
-                var band = ""
-                switch ch.channelBand {
-                case .band2GHz: band = "2.4 GHz"
-                case .band5GHz: band = "5 GHz"
-                case .band6GHz: band = "6 GHz"
-                default: break
-                }
-                var width = ""
-                switch ch.channelWidth {
-                case .width20MHz: width = "20 MHz"
-                case .width40MHz: width = "40 MHz"
-                case .width80MHz: width = "80 MHz"
-                case .width160MHz: width = "160 MHz"
-                default: break
-                }
-                if !band.isEmpty && !width.isEmpty {
-                    s.netChannel = "\(channelNum) (\(band), \(width))"
-                } else if !band.isEmpty {
-                    s.netChannel = "\(channelNum) (\(band))"
+                var channelNum = 0
+                if let ch = wifi?.wlanChannel() {
+                    channelNum = ch.channelNumber
+                    var band = ""
+                    switch ch.channelBand {
+                    case .band2GHz: band = "2.4 GHz"
+                    case .band5GHz: band = "5 GHz"
+                    case .band6GHz: band = "6 GHz"
+                    default: break
+                    }
+                    var width = ""
+                    switch ch.channelWidth {
+                    case .width20MHz: width = "20 MHz"
+                    case .width40MHz: width = "40 MHz"
+                    case .width80MHz: width = "80 MHz"
+                    case .width160MHz: width = "160 MHz"
+                    default: break
+                    }
+                    if !band.isEmpty && !width.isEmpty {
+                        s.netChannel = "\(channelNum) (\(band), \(width))"
+                    } else if !band.isEmpty {
+                        s.netChannel = "\(channelNum) (\(band))"
+                    } else {
+                        s.netChannel = "\(channelNum)"
+                    }
                 } else {
-                    s.netChannel = "\(channelNum)"
+                    s.netChannel = "—"
                 }
+
+                if let mode = wifi?.activePHYMode() {
+                    switch mode {
+                    case .mode11a: s.netStandard = "802.11a"
+                    case .mode11b: s.netStandard = "802.11b"
+                    case .mode11g: s.netStandard = "802.11g"
+                    case .mode11n: s.netStandard = "802.11n (Wi-Fi 4)"
+                    case .mode11ac: s.netStandard = "802.11ac (Wi-Fi 5)"
+                    case .mode11ax: s.netStandard = "802.11ax (Wi-Fi 6)"
+                    case .mode11be: s.netStandard = "802.11be (Wi-Fi 7)"
+                    default: s.netStandard = "—"
+                    }
+                } else {
+                    s.netStandard = "—"
+                }
+
+                s.netBSSID = currentBSSID(wifi: wifi, ssid: s.netSSID, channel: channelNum) ?? "—"
             } else {
+                s.netRSSI = 0
+                s.netNoise = 0
+                s.netTxRate = 0.0
                 s.netChannel = "—"
-            }
-
-            if let mode = wifi?.activePHYMode() {
-                switch mode {
-                case .mode11a: s.netStandard = "802.11a"
-                case .mode11b: s.netStandard = "802.11b"
-                case .mode11g: s.netStandard = "802.11g"
-                case .mode11n: s.netStandard = "802.11n (Wi-Fi 4)"
-                case .mode11ac: s.netStandard = "802.11ac (Wi-Fi 5)"
-                case .mode11ax: s.netStandard = "802.11ax (Wi-Fi 6)"
-                case .mode11be: s.netStandard = "802.11be (Wi-Fi 7)"
-                default: s.netStandard = "—"
-                }
-            } else {
                 s.netStandard = "—"
+                s.netBSSID = "—"
             }
-
-            s.netBSSID = currentBSSID(wifi: wifi, ssid: s.netSSID, channel: channelNum) ?? "—"
-        } else {
-            s.netRSSI = 0
-            s.netNoise = 0
-            s.netTxRate = 0.0
-            s.netChannel = "—"
-            s.netStandard = "—"
-            s.netBSSID = "—"
         }
         let dt = Date().timeIntervalSince(prevNetAt)
         if prevNetName == iface.name, prevNetIn > 0, dt > 0.2, dt < 10.0 {
@@ -755,6 +757,7 @@ final class Sampler: ObservableObject {
         heavy = true
         var s = snap
         sampleDisk(&s)
+        sampleNet(&s)
         sampleBattery(&s)
         sampleProcs(&s)
         snap = s
