@@ -996,6 +996,7 @@ final class Sampler: ObservableObject {
                 break
             }
         }
+        guard heavy || dumping else { return }
         let now = Date()
         let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
         if svc != 0 {
