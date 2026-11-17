@@ -172,6 +172,16 @@ final class Sampler: ObservableObject {
     private var lastProcsMs = 0.0
     private let dumping = CommandLine.arguments.contains("--dump")
     var heavy = false
+    private let procQueue = DispatchQueue(label: "com.lov3u.sino.procs", qos: .utility)
+    private var procBusy = false
+
+    private struct RawProc {
+        let pid: pid_t
+        let rawPath: String?
+        let cpu: Double?
+        let mem: UInt64?
+        let energyW: Double?
+    }
     private var netInHist = Array(repeating: 0.0, count: 48)
     private var netOutHist = Array(repeating: 0.0, count: 48)
     private var netInPeak = 0.0
@@ -257,10 +267,11 @@ final class Sampler: ObservableObject {
         sampleNet(&s)
         sampleFans(&s)
         sampleBattery(&s)
-        if heavy || dumping {
-            let t0 = Date()
-            sampleProcs(&s)
-            lastProcsMs = Date().timeIntervalSince(t0) * 1000.0
+        if dumping {
+            syncProcs(&s)
+            kickNetTop()
+        } else if heavy {
+            kickProcs()
             kickNetTop()
         } else {
             s.processes = []
@@ -769,8 +780,13 @@ final class Sampler: ObservableObject {
         sampleDisk(&s)
         sampleNet(&s)
         sampleBattery(&s)
-        sampleProcs(&s)
+        if dumping {
+            syncProcs(&s)
+        }
         snap = s
+        if !dumping {
+            kickProcs()
+        }
         kickNetTop()
         pollFastBattery()
     }
@@ -797,9 +813,11 @@ final class Sampler: ObservableObject {
         netTopName = "—"
         netTopIcon = nil
         netTopBps = 0
-        prevProc = [:]
-        prevEnergy = [:]
         identityCache = [:]
+        procQueue.async { [weak self] in
+            self?.prevProc = [:]
+            self?.prevEnergy = [:]
+        }
         var s = snap
         s.processes = []
         s.memProcesses = []
@@ -1042,19 +1060,44 @@ final class Sampler: ObservableObject {
         }
     }
 
-    private func sampleProcs(_ s: inout Snapshot) {
+    private func syncProcs(_ s: inout Snapshot) {
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let raw = procQueue.sync { collectRawProcs(myPID: myPID) }
+        let t0 = Date()
+        applyRawProcs(raw, to: &s)
+        lastProcsMs = Date().timeIntervalSince(t0) * 1000.0
+    }
+
+    private func kickProcs() {
+        guard !procBusy else { return }
+        procBusy = true
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        procQueue.async { [weak self] in
+            guard let self else { return }
+            let raw = self.collectRawProcs(myPID: myPID)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.procBusy = false
+                guard self.heavy else { return }
+                let t0 = Date()
+                var s = self.snap
+                self.applyRawProcs(raw, to: &s)
+                self.lastProcsMs = Date().timeIntervalSince(t0) * 1000.0
+                self.snap = s
+            }
+        }
+    }
+
+    private func collectRawProcs(myPID: pid_t) -> [RawProc] {
         var pids = [pid_t](repeating: 0, count: 4096)
         let bytes = proc_listpids(UInt32(PROC_ALL_PIDS), 0, &pids, Int32(MemoryLayout<pid_t>.stride * pids.count))
-        guard bytes > 0 else { return }
+        guard bytes > 0 else { return [] }
         let n = Int(bytes) / MemoryLayout<pid_t>.stride
         let now = Date()
-        let myPID = ProcessInfo.processInfo.processIdentifier
         let dt = now.timeIntervalSince(prevProcAt)
         var next: [pid_t: UInt64] = [:]
         var nextEnergy: [pid_t: UInt64] = [:]
-        var ranked: [(pid_t, String, NSImage?, Double)] = []
-        var byMem: [(pid_t, String, NSImage?, UInt64)] = []
-        var byEnergy: [(pid_t, String, NSImage?, Double)] = []
+        var out: [RawProc] = []
         for i in 0..<n {
             let pid = pids[i]
             if pid <= 0 { continue }
@@ -1065,43 +1108,63 @@ final class Sampler: ObservableObject {
             next[pid] = total
             let rss = ti.pti_resident_size
             var foot: UInt64 = 0
-            if sino_pid_footprint(Int32(pid), &foot) != 0 || foot == 0 { foot = rss }
             var nj: UInt64 = 0
-            let hasE = sino_pid_energy_nj(Int32(pid), &nj) == 0
+            let hasRusage = sino_pid_rusage(Int32(pid), &foot, &nj) == 0
+            if !hasRusage || foot == 0 { foot = rss }
+            let hasE = hasRusage
             if hasE { nextEnergy[pid] = nj }
-            let wantCPU = dt > 0.2 && dt < 10.0 && prevProc[pid] != nil
-            let wantMem = foot > 16 * 1024 * 1024 || pid == myPID
-            let wantE = hasE && dt > 0.2 && dt < 10.0 && prevEnergy[pid] != nil
-            if !wantCPU && !wantMem && !wantE { continue }
-            let rawPath = procPath(pid)
+
+            var cpu: Double?
+            if dt > 0.2 && dt < 10.0, let prev = prevProc[pid] {
+                let d = total >= prev ? total - prev : 0
+                let nanos = (Double(d) * Double(timebaseNumer)) / Double(timebaseDenom)
+                let pct = (nanos / 1_000_000_000.0) / max(dt, 0.001)
+                if pct >= 0.001 {
+                    cpu = min(Double(totalCores), pct)
+                }
+            }
+            let mem: UInt64? = (foot > 16 * 1024 * 1024 || pid == myPID) ? foot : nil
+            var energyW: Double?
+            if hasE, dt > 0.2 && dt < 10.0, let prev = prevEnergy[pid], nj >= prev {
+                let watts = Double(nj - prev) / 1_000_000_000 / max(dt, 0.2)
+                if watts > 0.03 {
+                    energyW = watts
+                }
+            }
+            guard cpu != nil || mem != nil || energyW != nil else { continue }
+            out.append(RawProc(pid: pid, rawPath: procPath(pid), cpu: cpu, mem: mem, energyW: energyW))
+        }
+        prevProc = next
+        prevEnergy = nextEnergy
+        prevProcAt = now
+        return out
+    }
+
+    private func applyRawProcs(_ raw: [RawProc], to s: inout Snapshot) {
+        var ranked: [(pid_t, String, NSImage?, Double)] = []
+        var byMem: [(pid_t, String, NSImage?, UInt64)] = []
+        var byEnergy: [(pid_t, String, NSImage?, Double)] = []
+        for r in raw {
             let identity: (String, NSImage?)
-            if let rawPath, let cached = identityCache[rawPath] {
+            if let rawPath = r.rawPath, let cached = identityCache[rawPath] {
                 identity = cached
             } else {
-                let resolved = procIdentity(pid, rawPath: rawPath)
-                if let rawPath {
+                let resolved = procIdentity(r.pid, rawPath: r.rawPath)
+                if let rawPath = r.rawPath {
                     identityCache[rawPath] = resolved
                 }
                 identity = resolved
             }
             let (name, icon) = identity
             if name == "kernel_task" { continue }
-            if wantMem {
-                byMem.append((pid, name, icon, foot))
+            if let mem = r.mem {
+                byMem.append((r.pid, name, icon, mem))
             }
-            if wantCPU, let prev = prevProc[pid] {
-                let d = total >= prev ? total - prev : 0
-                let nanos = (Double(d) * Double(timebaseNumer)) / Double(timebaseDenom)
-                let pct = (nanos / 1_000_000_000.0) / max(dt, 0.001)
-                if pct >= 0.001 {
-                    ranked.append((pid, name, icon, min(Double(totalCores), pct)))
-                }
+            if let cpu = r.cpu {
+                ranked.append((r.pid, name, icon, cpu))
             }
-            if wantE, let prev = prevEnergy[pid], nj >= prev {
-                let watts = Double(nj - prev) / 1_000_000_000 / max(dt, 0.2)
-                if watts > 0.03 {
-                    byEnergy.append((pid, name, icon, watts))
-                }
+            if let energyW = r.energyW {
+                byEnergy.append((r.pid, name, icon, energyW))
             }
         }
         ranked.sort { $0.3 > $1.3 }
@@ -1122,9 +1185,6 @@ final class Sampler: ObservableObject {
             byEnergy.map { ProcSample(id: $0.0, name: $0.1, icon: $0.2, energyW: $0.3, count: 1, pids: [$0.0]) },
             by: \.energyW
         ).prefix(5).map { $0 }
-        prevProc = next
-        prevEnergy = nextEnergy
-        prevProcAt = now
     }
 }
 
