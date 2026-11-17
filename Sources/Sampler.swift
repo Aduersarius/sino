@@ -172,6 +172,7 @@ final class Sampler: ObservableObject {
     private var lastProcsMs = 0.0
     private let dumping = CommandLine.arguments.contains("--dump")
     var heavy = false
+    var trackTemps = false
     private let procQueue = DispatchQueue(label: "com.lov3u.sino.procs", qos: .utility)
     private var procBusy = false
 
@@ -721,6 +722,7 @@ final class Sampler: ObservableObject {
         var s = snap
         sampleDisk(&s)
         sampleNet(&s)
+        sampleFans(&s)
         sampleBattery(&s)
         if dumping {
             syncProcs(&s)
@@ -900,33 +902,37 @@ final class Sampler: ObservableObject {
     }
 
     private func sampleFans(_ s: inout Snapshot) {
-        var rpm = [Float](repeating: 0, count: 8)
-        var mn = [Float](repeating: 0, count: 8)
-        var mx = [Float](repeating: 0, count: 8)
-        let n = Int(sino_smc_fans(&rpm, &mn, &mx, 8))
-        let fans: [FanSample] = (0..<n).map { i in
-            FanSample(id: i, name: "Fan #\(i + 1)", rpm: Double(rpm[i]), minRPM: Double(mn[i]), maxRPM: Double(mx[i]))
-        }
-        s.fans = fans
-        let maxFrac = fans.compactMap { $0.maxRPM > 0 ? min(1.0, max(0.0, $0.rpm / $0.maxRPM)) : 0.0 }.max() ?? 0.0
-        fanHistory.removeFirst()
-        fanHistory.append(maxFrac)
-        s.fanHistory = fanHistory
-        var nameBuf = [CChar](repeating: 0, count: 16 * 32)
-        var cels = [Float](repeating: 0, count: 16)
-        let tn = nameBuf.withUnsafeMutableBufferPointer { nb in
-            cels.withUnsafeMutableBufferPointer { cb in
-                sino_smc_temps(nb.baseAddress, cb.baseAddress, 16)
+        if heavy || dumping || s.fans.isEmpty || trackTemps || Prefs.shared.bar.contains("fans") {
+            var rpm = [Float](repeating: 0, count: 8)
+            var mn = [Float](repeating: 0, count: 8)
+            var mx = [Float](repeating: 0, count: 8)
+            let n = Int(sino_smc_fans(&rpm, &mn, &mx, 8))
+            let fans: [FanSample] = (0..<n).map { i in
+                FanSample(id: i, name: "Fan #\(i + 1)", rpm: Double(rpm[i]), minRPM: Double(mn[i]), maxRPM: Double(mx[i]))
             }
+            s.fans = fans
+            let maxFrac = fans.compactMap { $0.maxRPM > 0 ? min(1.0, max(0.0, $0.rpm / $0.maxRPM)) : 0.0 }.max() ?? 0.0
+            fanHistory.removeFirst()
+            fanHistory.append(maxFrac)
+            s.fanHistory = fanHistory
         }
-        var temps: [TempSample] = []
-        for i in 0..<Int(tn) {
-            let name = nameBuf.withUnsafeBufferPointer { p in
-                String(cString: p.baseAddress! + i * 32)
+        if heavy || dumping || trackTemps {
+            var nameBuf = [CChar](repeating: 0, count: 16 * 32)
+            var cels = [Float](repeating: 0, count: 16)
+            let tn = nameBuf.withUnsafeMutableBufferPointer { nb in
+                cels.withUnsafeMutableBufferPointer { cb in
+                    sino_smc_temps(nb.baseAddress, cb.baseAddress, 16)
+                }
             }
-            temps.append(TempSample(id: i, name: name, c: Double(cels[i])))
+            var temps: [TempSample] = []
+            for i in 0..<Int(tn) {
+                let name = nameBuf.withUnsafeBufferPointer { p in
+                    String(cString: p.baseAddress! + i * 32)
+                }
+                temps.append(TempSample(id: i, name: name, c: Double(cels[i])))
+            }
+            s.temps = temps
         }
-        s.temps = temps
     }
 
     private func sampleBattery(_ s: inout Snapshot) {

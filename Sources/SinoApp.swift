@@ -410,6 +410,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
         fanHold?.invalidate()
         fanHold = nil
         fanMode = .auto
+        sampler.trackTemps = false
         fanTargets = [:]
         fanReassertInFlight = false
         let work = {
@@ -465,6 +466,7 @@ final class App: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func armFans(_ mode: FanMode) {
         fanMode = mode
+        sampler.trackTemps = (mode == .curve)
         if mode == .manual {
             for f in sampler.snap.fans {
                 let t = fanTargets[f.id] ?? f.rpm
