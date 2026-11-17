@@ -29,8 +29,8 @@ build links it without `-framework Security` (`Undefined symbols … _SecCodeChe
 | [007](007-uninstall-and-scope-privileges.md) | User-scoped pmset rule, no needless prompts, uninstall | P2 | M | 006 | DONE (live check pending) |
 | [008](008-proc-identity-cache.md) | Cache process names/icons by path | P2 | S–M | (after 005) | DONE (timings pending) |
 | [009](009-closed-state-sampling.md) | Closed-state sampling diet (idle CPU) | P2 | M | 005, 008 | DONE (CPU measurement pending) |
-| [010](010-fan-socket-off-main.md) | Fan socket I/O off main + fix g_fan_fd mutex/framing | P1 | M | — | TODO |
-| [011](011-procs-rusage-and-off-main.md) | Single sino_pid_rusage syscall + scan procs off main | P1 | M | — | TODO |
+| [010](010-fan-socket-off-main.md) | Fan socket I/O off main + fix g_fan_fd mutex/framing | P1 | M | — | DONE |
+| [011](011-procs-rusage-and-off-main.md) | Single sino_pid_rusage syscall + scan procs off main | P1 | M | — | DONE |
 | [012](012-remove-clean-ram.md) | Remove fake Clean RAM memory-pressure trick | P2 | S | 010, 011 | TODO |
 | [013](013-idle-cpu-smc-and-cat.md) | Cache SMC key info, skip unused closed reads, sleep cat timer | P1 | M | 010, 011, 012 | TODO |
 
